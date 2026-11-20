@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Catatan Keuangan</title>
+  <meta name="description" content="Catat pemasukan & pengeluaran dalam hitungan detik, langsung ke Google Sheets.">
+  <meta name="theme-color" content="#F7F8FC">
+  <meta name="color-scheme" content="light">
+
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Keuangan">
+
+  <!-- Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="bg-orbs" aria-hidden="true"><span></span><span></span><span></span></div>
+
+  <!-- Layar kunci PIN / onboarding (diisi oleh app.js) -->
+  <div id="gate" class="gate" hidden></div>
+
+  <!-- Aplikasi utama -->
+  <div id="app" class="app" hidden>
+    <main id="view" class="view" tabindex="-1"></main>
+
+    <nav class="bottom-nav" aria-label="Navigasi utama">
+      <button class="nav-btn" data-nav="home" aria-label="Beranda"></button>
+      <button class="nav-btn" data-nav="history" aria-label="Riwayat"></button>
+      <button class="fab" data-action="open-add" aria-label="Tambah transaksi"></button>
+      <button class="nav-btn" data-nav="stats" aria-label="Statistik"></button>
+      <button class="nav-btn" data-nav="settings" aria-label="Pengaturan"></button>
+    </nav>
+  </div>
+
+  <!-- Bottom sheet (form tambah/edit, filter custom, dll) -->
+  <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+  <section id="sheet" class="sheet" role="dialog" aria-modal="true" hidden></section>
+
+  <!-- Dialog konfirmasi -->
+  <div id="dialog" class="dialog-wrap" hidden></div>
+
+  <!-- Notifikasi -->
+  <div id="toast-host" class="toast-host" aria-live="polite"></div>
+
+  <noscript>Aplikasi ini membutuhkan JavaScript.</noscript>
+  <script src="./app.js"></script>
+</body>
+</html>
