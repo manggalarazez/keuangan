@@ -1,7 +1,7 @@
 /**
  * ============================================================
  *  API CATATAN KEUANGAN — Google Apps Script (Backend)
- *  Versi 2.0 (rencana bulanan + aset)
+ *  Versi 2.1 (rencana bulanan + aset + dana khusus)
  * ============================================================
  *
  *  Cara pakai singkat (detail ada di panduan):
@@ -45,14 +45,19 @@ const PLAN_PREFIX = 'PLAN_'; // rencana per bulan: PLAN_YYYY-MM-DD (tanggal mula
 // Sheet aset (dibuat otomatis bila belum ada)
 const ASET_SHEET = 'Aset';
 const MUTASI_SHEET = 'Mutasi Aset';
-const ASET_HEADERS = ['ID', 'Nama', 'Jenis', 'Saldo Awal', 'Gram Awal', 'Tanggal Mulai', 'Harga per Gram', 'Aktif'];
+const ASET_HEADERS = ['ID', 'Nama', 'Jenis', 'Saldo Awal', 'Gram Awal', 'Tanggal Mulai', 'Harga per Gram', 'Aktif', 'Target'];
 const MUTASI_HEADERS = ['ID', 'Tanggal', 'Aset ID', 'Aset', 'Jenis', 'Nominal', 'Gram', 'Catatan', 'Ref Transaksi'];
-const ASET_JENIS = ['Kas utama', 'Bank', 'E-wallet', 'Tunai', 'Emas', 'Deposito', 'Lainnya'];
+const ASET_JENIS = ['Kas utama', 'Bank', 'E-wallet', 'Tunai', 'Emas', 'Deposito', 'Dana khusus', 'Lainnya'];
+// Arah transaksi yang tertaut ke aset:
+//   pengeluaran: setor (kas -> aset) | bayar (dibayar langsung dari aset, kas tidak berubah)
+//   pemasukan  : tarik (aset -> kas) | terima (uang masuk langsung ke aset, kas tidak berubah)
+const ARAH = { setor: ['Setor', 1], bayar: ['Bayar', -1], tarik: ['Tarik', -1], terima: ['Terima', 1] };
 
 const DEFAULT_SETTINGS = {
   budgetBulanan: 3000000,
   budgetMingguan: 750000,
   awalSiklus: 1, // tanggal mulai siklus bulanan (1-28)
+  danaDarurat: 0, // pengeluaran wajib per bulan untuk menghitung dana darurat (0 = otomatis)
   kategori: {
     pemasukan: ['Gaji', 'Bonus', 'Freelance', 'Hasil Investasi', 'Ambil dari Tabungan', 'Lainnya'],
     pengeluaran: ['Makanan & Minuman', 'Transportasi', 'Belanja', 'Tagihan & Utilitas', 'Orang Tua',
@@ -439,7 +444,8 @@ function validateTx_(p) {
     keterangan: String(p.keterangan || '').trim().slice(0, 200),
     nominal: Math.round(nominal),
     // Opsional: transaksi ini menambah (pengeluaran/menabung) atau mengurangi (pemasukan/ambil) sebuah aset.
-    aset: p.aset && p.aset.asetId ? { asetId: String(p.aset.asetId), gram: Math.abs(Number(p.aset.gram) || 0) } : null
+    aset: p.aset && p.aset.asetId ? { asetId: String(p.aset.asetId), gram: Math.abs(Number(p.aset.gram) || 0),
+      arah: ARAH[p.aset.arah] ? p.aset.arah : (jenis === 'pengeluaran' ? 'setor' : 'tarik') } : null
   };
 }
 
@@ -459,6 +465,7 @@ function saveSettings_(p) {
   const next = Object.assign({}, cur);
   if (p.budgetBulanan != null) next.budgetBulanan = Math.max(0, Math.round(Number(p.budgetBulanan) || 0));
   if (p.budgetMingguan != null) next.budgetMingguan = Math.max(0, Math.round(Number(p.budgetMingguan) || 0));
+  if (p.danaDarurat != null) next.danaDarurat = Math.max(0, Math.round(Number(p.danaDarurat) || 0));
   if (p.awalSiklus != null) next.awalSiklus = Math.min(28, Math.max(1, Math.round(Number(p.awalSiklus) || 1)));
   if (p.kategori) {
     ['pemasukan', 'pengeluaran'].forEach(function (j) {
@@ -568,7 +575,8 @@ function listAset_() {
   const aset = a ? readTable_(a, ASET_HEADERS.length).map(function (x) {
     const r = x.v;
     return { id: String(r[0]), nama: String(r[1]), jenis: String(r[2]), saldoAwal: Number(r[3]) || 0, gramAwal: Number(r[4]) || 0,
-      mulai: toYmd_(r[5], tz), harga: Number(r[6]) || 0, aktif: !(r[7] === false || String(r[7]).toUpperCase() === 'FALSE') };
+      mulai: toYmd_(r[5], tz), harga: Number(r[6]) || 0, aktif: !(r[7] === false || String(r[7]).toUpperCase() === 'FALSE'),
+      target: Number(r[8]) || 0 };
   }) : [];
   const mutasi = m ? readTable_(m, MUTASI_HEADERS.length).map(function (x) {
     const r = x.v;
@@ -588,7 +596,9 @@ function saveAsset_(p) {
   const sh = sheetFor_(ASET_SHEET, ASET_HEADERS);
   const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
   const values = [id, safeText_(nama), jenis, Math.round(Number(p.saldoAwal) || 0), Math.max(0, Number(p.gramAwal) || 0),
-    Utilities.parseDate(mulai, tz, 'yyyy-MM-dd'), Math.max(0, Math.round(Number(p.harga) || 0)), p.aktif !== false];
+    Utilities.parseDate(mulai, tz, 'yyyy-MM-dd'), Math.max(0, Math.round(Number(p.harga) || 0)), p.aktif !== false,
+    Math.max(0, Math.round(Number(p.target) || 0))];
+  if (sh.getRange(1, 9).getValue() === '') sh.getRange(1, 9).setValue('Target'); // sheet dari versi 2.0
   const found = readTable_(sh, ASET_HEADERS.length).filter(function (x) { return String(x.v[0]) === id; })[0];
   writeRow_(sh, found ? found.row : Math.max(sh.getLastRow(), 1) + 1, values);
   if (!found) {
@@ -653,11 +663,12 @@ function syncLinkedMutasi_(tx) {
     linked.slice().reverse().forEach(function (x) { sh.deleteRow(x.row); });
     return;
   }
-  // Pengeluaran (menabung/beli emas) menambah aset; pemasukan (ambil tabungan/jual emas) menguranginya.
-  const sign = tx.jenis === 'pengeluaran' ? 1 : -1;
+  // Setor/terima menambah aset; bayar/tarik menguranginya.
+  const arah = ARAH[tx.aset.arah] || (tx.jenis === 'pengeluaran' ? ARAH.setor : ARAH.tarik);
+  const sign = arah[1];
   linked.slice(1).reverse().forEach(function (x) { sh.deleteRow(x.row); });
   writeMutasi_({ id: linked.length ? String(linked[0].v[0]) : Utilities.getUuid(), tanggal: tx.tanggal, asetId: tx.aset.asetId,
-    jenis: sign > 0 ? 'Setor' : 'Tarik', nominal: sign * tx.nominal, gram: sign * (tx.aset.gram || 0),
+    jenis: arah[0], nominal: sign * tx.nominal, gram: sign * (tx.aset.gram || 0),
     catatan: tx.keterangan || tx.kategori, ref: String(tx.id) });
 }
 
