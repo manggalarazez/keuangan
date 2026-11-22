@@ -485,3 +485,9 @@ textarea.input { padding: 12px 14px; min-height: 80px; resize: vertical; }
 
 .as-lbls { margin-bottom: 4px; }
 .as-lbls span { flex: 1; font-size: 12px; color: var(--muted); font-weight: 600; }
+.seg.seg-sm button { min-height: 38px; font-size: 13px; }
+.ac-target { padding-left: 54px; margin-top: 8px; }
+.ac-target span { font-size: 12px; color: var(--text-2); display: block; margin-top: 4px; }
+.dd-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.dd-item input { width: 18px; height: 18px; accent-color: var(--primary); }
+.dd-item span { flex: 1; }
