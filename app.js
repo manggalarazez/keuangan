@@ -4,7 +4,7 @@
    ========================================================= */
 'use strict';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 /* ---------------- Penyimpanan lokal ---------------- */
 const LS = {
@@ -115,7 +115,8 @@ const IC = {
   calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   reset: '<path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v5h5"/>',
-  del: '<path d="M21 5H9l-6 7 6 7h12z"/><path d="m17 9-6 6M11 9l6 6"/>'
+  del: '<path d="M21 5H9l-6 7 6 7h12z"/><path d="m17 9-6 6M11 9l6 6"/>',
+  send: '<path d="M21 3 3 10.5l7 2.5 2.5 7z"/><path d="m21 3-11 10"/>'
 };
 const ico = (n, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${IC[n] || ''}</svg>`;
 
@@ -1057,6 +1058,11 @@ function renderSettings() {
     ${sheets ? row('sync', 'refresh', 'Sinkronkan sekarang', last ? `Terakhir ${last.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Belum pernah') : ''}
   </div>
 
+  <div class="section-title"><h2>Catat lewat chat</h2></div>
+  <div class="set-group">
+    ${row('open-tg', 'send', 'Bot Telegram', sheets ? 'Ketik "makan siang 25rb" di Telegram, langsung masuk Sheets' : 'Hubungkan Google Sheets dulu')}
+  </div>
+
   <div class="section-title"><h2>Budget</h2></div>
   <div class="set-group">
     ${row('open-budget', 'target', 'Budget bulanan & mingguan', `${rp(s.budgetBulanan)} / bulan · ${rp(s.budgetMingguan)} / minggu`)}
@@ -1088,6 +1094,103 @@ function renderSettings() {
     ${row('reset-app', 'reset', 'Reset aplikasi di HP ini', sheets ? 'Data di Google Sheets tetap aman' : 'Semua data lokal akan terhapus')}
   </div>
   <p class="hint" style="text-align:center;margin-top:20px">Catatan Keuangan v${APP_VERSION}</p>`;
+}
+
+/* ---------------- Bot Telegram ---------------- */
+function openTelegram() {
+  if (!(S.cfg && S.cfg.mode === 'sheets')) { toast('Hubungkan Google Sheets dulu', 'warn'); return; }
+  openSheet(`
+    <div class="sheet-head"><h3>Bot Telegram</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
+    <div class="sheet-body" id="tg-body"><p class="hint" style="margin:8px 0 20px">Memeriksa bot…</p></div>`, () => tgLoad());
+}
+async function tgCall(op, extra) {
+  return apiCall('telegram', Object.assign({ op }, extra || {}));
+}
+function tgErrMsg(e) {
+  const m = String(e && e.message || e);
+  if (/permission|UrlFetchApp|external_request|izin/i.test(m)) return 'Server Apps Script belum diberi izin menghubungi Telegram. Buka editor Apps Script, pilih fungsi izinkanTelegram, tekan Jalankan, lalu Izinkan. Setelah itu coba lagi.';
+  if (/Aksi tidak dikenal/i.test(m)) return 'Server Apps Script masih versi lama. Perbarui Code.gs ke versi 2.2 lalu deploy versi baru.';
+  return m;
+}
+async function tgLoad(st) {
+  const body = $('#tg-body'); if (!body) return;
+  if (!st) {
+    try { st = await tgCall('status'); } catch (e) {
+      if (!$('#tg-body')) return;
+      body.innerHTML = `<div class="err-msg">${esc(tgErrMsg(e))}</div><button class="btn ghost" style="margin-top:14px" id="tg-retry">${ico('refresh', 'sm')} Coba lagi</button>`;
+      $('#tg-retry').onclick = () => { body.innerHTML = '<p class="hint" style="margin:8px 0 20px">Memeriksa bot…</p>'; tgLoad(); };
+      return;
+    }
+  }
+  if (!$('#tg-body')) return;
+  const privacy = `<div class="tg-note">🔒 Bot hanya melihat nama &amp; ID Telegram kamu, bukan nomor HP. Hanya akunmu yang dipasangkan yang bisa mencatat; pesan dari orang lain diabaikan.</div>`;
+  const busy = (btn, txt) => { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> ${txt}`; };
+  const act = async (btn, txt, op, extra, okMsg) => {
+    const label = btn.innerHTML; busy(btn, txt);
+    try { const r = await tgCall(op, extra); if (okMsg) toast(okMsg, 'ok'); tgLoad(r); }
+    catch (e) { btn.disabled = false; btn.innerHTML = label; const er = $('#tg-err'); if (er) { er.textContent = tgErrMsg(e); er.hidden = false; } else toast(tgErrMsg(e), 'err', 5000); }
+  };
+  const offBtn = `<button class="btn danger" style="margin-top:10px" id="tg-off">${ico('x', 'sm')} Putuskan bot</button>`;
+  const bindOff = () => { $('#tg-off').onclick = async e => {
+    const btn = e.currentTarget;
+    if (!await confirmDialog({ title: 'Putuskan bot Telegram?', msg: 'Bot berhenti mencatat. Data yang sudah tercatat tetap ada di Sheets. Kamu bisa menghubungkan lagi kapan saja.', ok: 'Putuskan', danger: true })) return;
+    act(btn, 'Memutuskan…', 'disconnect', null, 'Bot diputuskan');
+  }; };
+  if (!st.connected) {
+    body.innerHTML = `
+      <p class="hint" style="margin-top:0;font-size:13px">Catat tanpa buka aplikasi: kirim <b>"makan siang 25rb"</b> ke bot, langsung masuk ke Google Sheets dan muncul di aplikasi.</p>
+      <ol class="tg-steps">
+        <li>Buka <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> di Telegram, kirim <b>/newbot</b>, lalu isi nama dan username bot (harus berakhiran <i>bot</i>, mis. <i>catatanku_bot</i>).</li>
+        <li>BotFather memberi <b>token</b> (bentuknya <i>123456789:AAH…</i>). Salin, lalu tempel di bawah.</li>
+      </ol>
+      <div class="field"><label for="tg-token">Token bot dari BotFather</label><div class="date-row"><input class="input" id="tg-token" type="password" placeholder="123456789:AAH…" autocomplete="off" spellcheck="false"><button type="button" class="btn ghost sm" id="tg-eye" aria-label="Lihat token">${ico('eye', 'sm')}</button></div>
+        <div class="hint">Token disimpan di server Apps Script milikmu, tidak di HP dan tidak di kode.</div></div>
+      <div class="err-msg" id="tg-err" hidden></div>
+      ${privacy}
+      <button class="btn primary" style="margin-top:14px" id="tg-connect">${ico('send', 'sm')} Hubungkan bot</button>`;
+    $('#tg-eye').onclick = () => { const t = $('#tg-token'); t.type = t.type === 'password' ? 'text' : 'password'; };
+    $('#tg-connect').onclick = e => {
+      const tok = $('#tg-token').value.trim().replace(/\s+/g, '');
+      const er = $('#tg-err');
+      if (!/^\d{5,}:[A-Za-z0-9_-]{30,}$/.test(tok)) { er.textContent = 'Token belum benar. Salin seluruh token dari BotFather (angka, titik dua, lalu huruf/angka).'; er.hidden = false; return; }
+      er.hidden = true;
+      act(e.currentTarget, 'Menghubungkan…', 'connect', { botToken: tok, url: S.cfg.url });
+    };
+    return;
+  }
+  const botLink = 'https://t.me/' + encodeURIComponent(st.bot);
+  const recentErr = st.webhook && st.webhook.lastError && st.webhook.lastErrorDate > Date.now() - 3600e3;
+  if (!st.owner) {
+    body.innerHTML = `
+      <div class="tg-ok">✅ Bot <b>@${esc(st.bot)}</b> siap.</div>
+      ${st.kode ? `<p style="font-size:14px;margin:12px 0">Langkah terakhir: buka bot lalu tekan <b>Start</b>. Link ini berlaku 30 menit dan hanya bisa dipakai sekali.</p>
+        <a class="btn primary" href="${esc(st.link)}" target="_blank" rel="noopener">${ico('send', 'sm')} Buka @${esc(st.bot)} &amp; tekan Start</a>
+        <button class="btn ghost" style="margin-top:10px" id="tg-check">${ico('refresh', 'sm')} Sudah, cek status</button>`
+      : `<p style="font-size:14px;margin:12px 0">Link pemasangan sudah kedaluwarsa.</p><button class="btn primary" id="tg-pair">${ico('refresh', 'sm')} Buat link baru</button>`}
+      <div class="err-msg" id="tg-err" hidden></div>
+      ${privacy}
+      ${offBtn}`;
+    const ck = $('#tg-check'); if (ck) ck.onclick = e => { busy(e.currentTarget, 'Memeriksa…'); tgLoad(); };
+    const pr = $('#tg-pair'); if (pr) pr.onclick = e => act(e.currentTarget, 'Membuat link…', 'pair');
+    bindOff();
+    return;
+  }
+  body.innerHTML = `
+    <div class="tg-ok">✅ Terhubung ke <b>@${esc(st.bot)}</b>${st.ownerName ? ` · akun ${esc(st.ownerName)}` : ''}</div>
+    ${recentErr ? `<div class="err-msg" style="margin-top:10px">Telegram melaporkan masalah: ${esc(st.webhook.lastError)}</div>` : ''}
+    <div class="tg-ex"><b>Coba kirim:</b>
+      <span>makan siang 25rb</span><span>bensin 50rb, kopi 18rb</span><span>+gaji 22jt</span><span>tiket pesawat 1,5jt dari traveling</span><span>/rekap · /hariini · /batal</span></div>
+    <p class="hint">Catatan dari chat langsung masuk Sheets dan muncul di aplikasi setiap kali aplikasi dibuka.</p>
+    <a class="btn primary" style="margin-top:12px" href="${botLink}" target="_blank" rel="noopener">${ico('send', 'sm')} Buka chat bot</a>
+    <div class="err-msg" id="tg-err" hidden></div>
+    <button class="btn ghost" style="margin-top:10px" id="tg-pair">Pindah ke akun Telegram lain</button>
+    ${offBtn}`;
+  $('#tg-pair').onclick = async e => {
+    const btn = e.currentTarget;
+    if (!await confirmDialog({ title: 'Pindah akun Telegram?', msg: 'Akun yang sekarang berhenti bisa mencatat. Kamu akan dapat link baru untuk akun lain.', ok: 'Buat link baru' })) return;
+    act(btn, 'Membuat link…', 'pair');
+  };
+  bindOff();
 }
 
 /* ---------------- Form tambah / edit ---------------- */
@@ -2194,6 +2297,7 @@ const ACTIONS = {
   'asset-tarik': el => assetQuickTx(el.dataset.id, 'pemasukan'),
   'mutasi-open': el => openMutasi(el.dataset.id),
   'open-dd-basis': () => openDDBasis(),
+  'open-tg': () => openTelegram(),
   'plan-toggle': el => togglePlanLunas(el.dataset.cat),
   'open-cats': () => openCats('pengeluaran'),
   'open-conn': () => openConn(),
