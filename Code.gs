@@ -1,7 +1,7 @@
 /**
  * ============================================================
  *  API CATATAN KEUANGAN — Google Apps Script (Backend)
- *  Versi 2.1 (rencana bulanan + aset + dana khusus)
+ *  Versi 2.2 (rencana bulanan + aset + dana khusus + bot Telegram)
  * ============================================================
  *
  *  Cara pakai singkat (detail ada di panduan):
@@ -72,6 +72,8 @@ function doGet() {
 }
 
 function doPost(e) {
+  // Pesan dari bot Telegram (webhook) dikenali dari parameter ?tg=<rahasia> di URL.
+  if (e && e.parameter && e.parameter.tg) return telegramWebhook_(e);
   let req;
   try {
     req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
@@ -107,6 +109,7 @@ function route_(action, p) {
     case 'deleteAsset': return withLock_(function () { return deleteAsset_(p); });
     case 'addMutasi': return withLock_(function () { return addMutasi_(p); });
     case 'deleteMutasi': return withLock_(function () { return deleteMutasi_(p); });
+    case 'telegram': return telegram_(p);
     default: throw new Error('Aksi tidak dikenal: ' + action);
   }
 }
@@ -720,4 +723,569 @@ function colLetter_(n) {
 
 function buatToken_() {
   return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 40);
+}
+
+// =====================================================================
+//  BOT TELEGRAM (v2.2)
+//  Chat ke bot pribadi -> tercatat di sheet yang sama dengan aplikasi.
+//  Token bot hanya disimpan di Script Properties, tidak pernah di aplikasi/kode.
+//  Bot hanya melayani SATU akun Telegram (pemilik) yang dipasangkan lewat link dari aplikasi.
+// =====================================================================
+const TG_P = { token: 'TG_TOKEN', secret: 'TG_SECRET', bot: 'TG_BOT', owner: 'TG_OWNER', ownerName: 'TG_OWNER_NAME',
+  pair: 'TG_PAIR', lastUpd: 'TG_LAST_UPDATE', lastTx: 'TG_LAST_TX' };
+const TG_SAVING_RE = /tabung|menabung|investasi|dana darurat|emas/i;
+const TG_WITHDRAW_RE = /ambil|tarik|cair|jual emas|dari tabungan/i;
+const TG_BULAN = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+const TG_BLN = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+
+/** Jalankan SEKALI dari editor agar Google meminta izin "terhubung ke layanan eksternal" (dipakai untuk Telegram). */
+function izinkanTelegram() {
+  UrlFetchApp.fetch('https://api.telegram.org', { muteHttpExceptions: true });
+  Logger.log('Izin OK. Sekarang hubungkan bot dari aplikasi: Pengaturan -> Bot Telegram.');
+}
+
+/** Aksi dari aplikasi (sudah lolos cek token API). */
+function telegram_(p) {
+  const props = PropertiesService.getScriptProperties();
+  const op = String(p.op || 'status');
+  if (op === 'status') return tgStatus_();
+  if (op === 'connect') {
+    const botToken = String(p.botToken || '').trim();
+    if (!/^\d{5,}:[A-Za-z0-9_-]{30,}$/.test(botToken)) throw new Error('Token bot tidak valid. Salin token dari @BotFather (bentuknya 123456789:AAH…).');
+    const url = String(p.url || '').trim();
+    if (!/^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('URL Web App harus berbentuk https://script.google.com/macros/s/…/exec');
+    const me = tgApi_(botToken, 'getMe', {});
+    if (!me.ok) throw new Error('Token bot ditolak Telegram: ' + (me.description || 'tidak dikenal'));
+    const secret = Utilities.getUuid().replace(/-/g, '');
+    const wh = tgApi_(botToken, 'setWebhook', { url: url + '?tg=' + secret, allowed_updates: ['message', 'callback_query'],
+      drop_pending_updates: true, max_connections: 5 });
+    if (!wh.ok) throw new Error('Gagal memasang webhook: ' + (wh.description || 'tidak dikenal'));
+    tgApi_(botToken, 'setMyCommands', { commands: [
+      { command: 'rekap', description: 'Rekap bulan ini' }, { command: 'hariini', description: 'Catatan hari ini' },
+      { command: 'batal', description: 'Hapus catatan terakhir' }, { command: 'bantuan', description: 'Cara pakai' }] });
+    props.setProperty(TG_P.token, botToken);
+    props.setProperty(TG_P.secret, secret);
+    props.setProperty(TG_P.bot, String(me.result.username || ''));
+    props.setProperty(TG_P.lastUpd, '0');
+    props.deleteProperty(TG_P.owner); props.deleteProperty(TG_P.ownerName); props.deleteProperty(TG_P.lastTx);
+    tgNewPair_();
+    return tgStatus_();
+  }
+  if (op === 'pair') {
+    if (!props.getProperty(TG_P.token)) throw new Error('Bot belum dihubungkan.');
+    props.deleteProperty(TG_P.owner); props.deleteProperty(TG_P.ownerName);
+    tgNewPair_();
+    return tgStatus_();
+  }
+  if (op === 'disconnect') {
+    const t = props.getProperty(TG_P.token);
+    if (t) { try { tgApi_(t, 'deleteWebhook', { drop_pending_updates: true }); } catch (e) { /* abaikan */ } }
+    Object.keys(TG_P).forEach(function (k) { props.deleteProperty(TG_P[k]); });
+    return tgStatus_();
+  }
+  throw new Error('Operasi Telegram tidak dikenal: ' + op);
+}
+
+function tgNewPair_() {
+  const kode = Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+  PropertiesService.getScriptProperties().setProperty(TG_P.pair, JSON.stringify({ kode: kode, exp: Date.now() + 30 * 60 * 1000 }));
+  return kode;
+}
+
+function tgStatus_() {
+  const pr = PropertiesService.getScriptProperties().getProperties();
+  const token = pr[TG_P.token];
+  if (!token) return { connected: false };
+  let pair = null;
+  try { pair = JSON.parse(pr[TG_P.pair] || 'null'); } catch (e) { pair = null; }
+  if (pair && pair.exp < Date.now()) pair = null;
+  let webhook = null;
+  try {
+    const r = tgApi_(token, 'getWebhookInfo', {});
+    if (r.ok) webhook = { aktif: !!r.result.url, pending: r.result.pending_update_count || 0,
+      lastError: r.result.last_error_message || '', lastErrorDate: (r.result.last_error_date || 0) * 1000 };
+  } catch (e) { webhook = null; }
+  const bot = pr[TG_P.bot] || '';
+  const owner = !!pr[TG_P.owner];
+  return { connected: true, bot: bot, owner: owner, ownerName: pr[TG_P.ownerName] || '',
+    link: owner || !pair ? 'https://t.me/' + bot : 'https://t.me/' + bot + '?start=' + pair.kode,
+    kode: owner || !pair ? null : pair.kode, kodeExp: owner || !pair ? null : pair.exp, webhook: webhook };
+}
+
+function tgApi_(token, method, payload) {
+  const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/' + method, {
+    method: 'post', contentType: 'application/json', payload: JSON.stringify(payload || {}), muteHttpExceptions: true });
+  try { return JSON.parse(res.getContentText()); } catch (e) { return { ok: false, description: 'HTTP ' + res.getResponseCode() }; }
+}
+
+function tgSend_(token, chatId, text, keyboard) {
+  const body = { chat_id: chatId, text: text, parse_mode: 'HTML', disable_web_page_preview: true };
+  if (keyboard) body.reply_markup = { inline_keyboard: keyboard };
+  return tgApi_(token, 'sendMessage', body);
+}
+
+/** Webhook. Selalu dibalas HtmlService (HTTP 200 langsung): ContentService di-redirect 302 dan membuat Telegram mengirim ulang. */
+function telegramWebhook_(e) {
+  const ok = HtmlService.createHtmlOutput('ok');
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const secret = props.getProperty(TG_P.secret);
+    if (!secret || String(e.parameter.tg) !== secret) return ok;
+    const upd = JSON.parse((e.postData && e.postData.contents) || '{}');
+    if (!tgFresh_(upd.update_id)) return ok;
+    const token = props.getProperty(TG_P.token);
+    if (!token) return ok;
+    if (upd.callback_query) tgCallback_(token, upd.callback_query);
+    else if (upd.message) tgMessage_(token, upd.message);
+  } catch (err) {
+    console.error('telegram: ' + ((err && err.stack) || err));
+  }
+  return ok;
+}
+
+/** Cegah pesan yang sama diproses dua kali (Telegram mengirim ulang bila menganggap gagal). */
+function tgFresh_(id) {
+  if (!id) return true;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return true;
+  try {
+    const p = PropertiesService.getScriptProperties();
+    if (Number(id) <= Number(p.getProperty(TG_P.lastUpd) || 0)) return false;
+    p.setProperty(TG_P.lastUpd, String(id));
+    return true;
+  } finally { lock.releaseLock(); }
+}
+
+function tgMessage_(token, msg) {
+  if (!msg.chat || msg.chat.type !== 'private') return;
+  const props = PropertiesService.getScriptProperties();
+  const chatId = String(msg.chat.id);
+  const owner = props.getProperty(TG_P.owner);
+  const text = String(msg.text || '').trim();
+  const start = text.match(/^\/start(?:@\w+)?(?:\s+(\S+))?/i);
+  if (start) {
+    if (owner === chatId) return tgSend_(token, chatId, tgHelp_());
+    let pair = null;
+    try { pair = JSON.parse(props.getProperty(TG_P.pair) || 'null'); } catch (e) { pair = null; }
+    if (!owner && pair && start[1] && start[1] === pair.kode && Date.now() < pair.exp) {
+      props.setProperty(TG_P.owner, chatId);
+      props.setProperty(TG_P.ownerName, String((msg.from && (msg.from.first_name || msg.from.username)) || '').slice(0, 40));
+      props.deleteProperty(TG_P.pair);
+      return tgSend_(token, chatId, '✅ <b>Bot terhubung ke Catatan Keuangan kamu.</b>\nHanya akun Telegram ini yang bisa mencatat.\n\n' + tgHelp_());
+    }
+    return tgSend_(token, chatId, '🔒 Bot ini privat. Hubungkan dari aplikasi: ⚙️ Pengaturan → Bot Telegram.');
+  }
+  if (owner !== chatId) return; // akun lain diabaikan
+  if (!text) return tgSend_(token, chatId, 'Kirim dalam bentuk teks ya, contoh: <i>makan siang 25rb</i>');
+  const cmd = text.toLowerCase().replace(/^\//, '').replace(/@\w+$/, '').replace(/\s+/g, ' ').trim();
+  if (/^(start|help|bantuan|menu|\?)$/.test(cmd)) return tgSend_(token, chatId, tgHelp_());
+  if (/^(rekap|ringkasan|laporan|rekap bulan ini)$/.test(cmd)) return tgSend_(token, chatId, tgRekap_());
+  if (/^(hari ?ini|today)$/.test(cmd)) return tgSend_(token, chatId, tgToday_());
+  if (/^(batal|undo|hapus|hapus terakhir)$/.test(cmd)) return tgUndo_(token, chatId);
+  tgRecord_(token, chatId, text);
+}
+
+function tgHelp_() {
+  return '<b>Cara pakai</b>\n' +
+    '• Ketik saja: <i>makan siang 25rb</i>, <i>bensin 50.000</i>, <i>+gaji 22jt</i>\n' +
+    '• Banyak sekaligus: satu baris satu transaksi\n' +
+    '• Tambah <i>kemarin</i> untuk tanggal kemarin\n' +
+    '• <i>tiket pesawat 1,5jt dari traveling</i> → dibayar dari dana Traveling\n' +
+    '• <i>nabung 2jt ke tabungan bank</i> → masuk ke aset\n\n' +
+    '<b>Perintah</b>: /rekap · /hariini · /batal · /bantuan';
+}
+
+// ---------- konteks: kategori, aset, tanggal ----------
+function tgCtx_() {
+  const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  const settings = getSettings_();
+  const cats = {};
+  ['pemasukan', 'pengeluaran'].forEach(function (j) {
+    let list = null;
+    try { list = readDropdown_(ctx_(j, true)); } catch (e) { list = null; }
+    cats[j] = list && list.length ? list : (settings.kategori[j] || []);
+  });
+  const a = listAset_();
+  return { tz: tz, settings: settings, cats: cats, assets: a.aset.filter(function (x) { return x.aktif; }), mutasi: a.mutasi,
+    today: Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd') };
+}
+
+function tgAddDays_(ymd, n) {
+  const d = new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10) + n));
+  return d.toISOString().slice(0, 10);
+}
+
+function tgCycle_(todayYmd, s) {
+  s = Math.min(28, Math.max(1, Number(s) || 1));
+  const y = +todayYmd.slice(0, 4), m = +todayYmd.slice(5, 7), d = +todayYmd.slice(8, 10);
+  const from = d >= s ? new Date(Date.UTC(y, m - 1, s)) : new Date(Date.UTC(y, m - 2, s));
+  const next = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, s));
+  const to = new Date(next.getTime() - 864e5);
+  const label = s === 1 ? TG_BULAN[from.getUTCMonth()] + ' ' + from.getUTCFullYear()
+    : from.getUTCDate() + ' ' + TG_BLN[from.getUTCMonth()] + ' – ' + to.getUTCDate() + ' ' + TG_BLN[to.getUTCMonth()];
+  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10), label: label };
+}
+
+function tgAllTx_() {
+  const out = [];
+  Object.keys(SHEET_NAMES).forEach(function (jenis) {
+    const c = ctx_(jenis, true);
+    const last = lastDataRow_(c);
+    if (last < 2) return;
+    c.sh.getRange(2, 1, last - 1, c.blockEnd).getValues().forEach(function (r, i) {
+      const tx = rowToTx_(c, r, i + 2);
+      if (tx && tx.nominal) out.push(tx);
+    });
+  });
+  return out;
+}
+
+// ---------- pembaca teks (sama dengan input cepat di aplikasi) ----------
+const TG_RULES = [
+  { j: 'pengeluaran', cat: /makan|minum|kuliner|food|jajan/i, kw: 'makan|minum|sarapan|nasi|kopi|ngopi|teh|jus|bakso|mie|mi ayam|soto|sate|geprek|padang|warteg|warung|resto|restoran|cafe|kafe|snack|jajan|cemilan|camilan|gofood|grabfood|shopeefood|martabak|roti|pizza|burger|kfc|mcd|mcdonald|starbucks|boba|susu|gorengan|seblak|pecel|coto|konro|pallubasa|es krim|es teh|air mineral|katering|catering|lauk|buah|kue|dimsum|ayam|ikan|bebek' },
+  { j: 'pengeluaran', cat: /transport|bensin|kendaraan/i, kw: 'bensin|bbm|pertalite|pertamax|solar|isi minyak|ojek|ojol|gojek|goride|gocar|grab|grabbike|grabcar|maxim|taksi|taxi|parkir|tol|etoll|e-toll|bus|busway|transjakarta|kereta|krl|mrt|lrt|pesawat|tiket pesawat|angkot|damri|kapal|ferry|pelni|servis motor|servis mobil|bengkel|ganti oli|oli|cuci motor|cuci mobil|ban|travel' },
+  { j: 'pengeluaran', cat: /belanja|shopping/i, kw: 'belanja|beli|baju|celana|sepatu|sandal|tas|shopee|tokopedia|tokped|lazada|tiktok shop|blibli|indomaret|alfamart|alfamidi|supermarket|minimarket|hypermart|pasar|sayur|beras|minyak goreng|gula|telur|galon|elpiji|lpg|gas elpiji|sabun|sampo|shampo|odol|pasta gigi|deterjen|tisu|skincare|kosmetik|perabot|elektronik|gadget|aksesoris|kebutuhan rumah' },
+  { j: 'pengeluaran', cat: /tagihan|utilitas|listrik/i, kw: 'listrik|pln|token listrik|token|pdam|tagihan|pulsa|kuota|paket data|internet|wifi|indihome|biznet|first media|bpjs|cicilan|angsuran|kredit|kos|kost|sewa|kontrakan|asuransi|pajak|pbb|iuran|langganan|ipl|biaya admin|admin bank' },
+  { j: 'pengeluaran', cat: /hiburan|rekreasi/i, kw: 'nonton|bioskop|cinema|xxi|cgv|netflix|spotify|youtube premium|disney|vidio|game|top up|voucher game|steam|liburan|wisata|rekreasi|karaoke|konser|hotel|staycation|jalan-jalan|jalan jalan|nongkrong|hobi' },
+  { j: 'pengeluaran', cat: /kesehatan|medis/i, kw: 'obat|dokter|apotek|apotik|klinik|rumah sakit|puskesmas|vitamin|suplemen|periksa|cek darah|lab|gigi|kacamata|masker|terapi|pijat|gym|fitness' },
+  { j: 'pengeluaran', cat: /pendidikan|edukasi|sekolah/i, kw: 'buku|kursus|kuliah|ukt|spp|sekolah|les|seminar|webinar|pelatihan|sertifikasi|ujian|alat tulis|fotokopi|print|udemy|coursera' },
+  { j: 'pengeluaran', cat: /tabung|menabung|investasi|dana darurat/i, kw: 'nabung|menabung|tabungan|investasi|reksadana|deposito|dana darurat|beli emas|emas antam' },
+  { j: 'pengeluaran', cat: /orang ?tua|ortu|keluarga/i, kw: 'ortu|orang tua|orangtua|kirim mama|kirim ibu|kirim bapak|kirim ayah|kirim papa|transfer ortu|transfer mama|transfer ibu|uang bulanan ortu|jatah ortu' },
+  { j: 'pengeluaran', cat: /sosial|donasi|amal|zakat/i, kw: 'sedekah|zakat|infak|infaq|donasi|kondangan|sumbangan|arisan|amplop|kado|traktir|kolekte|perpuluhan|persembahan' },
+  { j: 'pemasukan', cat: /gaji/i, kw: 'gaji|gajian|salary|upah' },
+  { j: 'pemasukan', cat: /bonus|thr/i, kw: 'bonus|thr|insentif|tunjangan|komisi' },
+  { j: 'pemasukan', cat: /freelance|proyek|project/i, kw: 'freelance|proyek|project|fee|honor|honorarium|jasa|klien|client' },
+  { j: 'pemasukan', cat: /investasi|dividen/i, kw: 'dividen|bunga deposito|bunga|imbal hasil|kupon|reksadana|saham|profit|cuan' },
+  { j: 'pemasukan', cat: /ambil|tarik|cair|tabung/i, kw: 'ambil tabungan|ambil dari tabungan|tarik tabungan|pencairan|cairkan|jual emas|pakai tabungan|pakai dana darurat|ambil dana darurat' },
+  { j: 'pemasukan', cat: /lain/i, kw: 'jual|penjualan|terima|diterima|dapat|dapet|cashback|refund|transfer masuk|uang masuk|pemasukan|kiriman' }
+];
+const TG_LOW_WEIGHT = { beli: 2, token: 3, tol: 4 };
+const tgEsc_ = function (w) { return w.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&'); };
+TG_RULES.forEach(function (r) {
+  r.words = r.kw.split('|').map(function (w) {
+    const tail = w.length < 4 ? '(?![a-z0-9])' : '';
+    return { re: new RegExp('(?:^|[^a-z0-9])' + tgEsc_(w) + tail, 'i'), weight: TG_LOW_WEIGHT[w] || w.length };
+  });
+});
+function tgHasWord_(text, w) { return new RegExp('(?:^|[^a-z0-9])' + tgEsc_(w), 'i').test(text); }
+
+function tgAmount_(text) {
+  const re = /(?:rp\.?\s*)?(\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)(?:\s*(ribu|rbu|rb|k|juta|jt))?(?![a-z0-9])/gi;
+  let best = null, m;
+  while ((m = re.exec(text))) {
+    const num = m[1], suf = (m[2] || '').toLowerCase();
+    let v = /^\d{1,3}(?:[.,]\d{3})+$/.test(num) ? Number(num.replace(/[.,]/g, '')) : Number(num.replace(',', '.'));
+    if (suf === 'rb' || suf === 'ribu' || suf === 'rbu' || suf === 'k') v *= 1e3;
+    if (suf === 'jt' || suf === 'juta') v *= 1e6;
+    v = Math.round(v);
+    if (isFinite(v) && v > 0 && (!best || v > best.value)) best = { value: v, text: m[0], index: m.index };
+  }
+  return best;
+}
+
+/** Pecah "bensin 50rb, kopi 25rb" / beberapa baris menjadi beberapa transaksi (hanya bila tiap bagian punya nominal). */
+function tgSplit_(text) {
+  const out = [];
+  text.split(/\n+/).map(function (s) { return s.trim(); }).filter(String).forEach(function (line) {
+    const pieces = line.split(/\s*;\s*|,\s+(?=[^\d\s])|\s+\+\s+|\s+(?:dan|sama|&)\s+/i).map(function (s) { return s.trim(); }).filter(String);
+    if (pieces.length > 1 && pieces.every(function (p) { return tgAmount_(p.replace(/(\d+(?:[.,]\d+)?)\s*(?:gram|gr|g)(?![a-z0-9])/i, ' ')); })) out.push.apply(out, pieces);
+    else out.push(line);
+  });
+  return out.slice(0, 20);
+}
+
+function tgParse_(raw, ctx) {
+  let forced = null;
+  raw = String(raw || '').trim();
+  if (raw.charAt(0) === '+') forced = 'pemasukan';
+  const lower = raw.toLowerCase();
+  const gm = raw.match(/(\d+(?:[.,]\d+)?)\s*(?:gram|gr|g)(?![a-z0-9])/i);
+  const gram = gm ? Number(gm[1].replace(',', '.')) : 0;
+  const rawNoGram = gm ? raw.replace(gm[0], ' ') : raw;
+  const amt = tgAmount_(rawNoGram);
+  let tanggal = null;
+  if (/(?:^|\s)(kemarin lusa|lusa kemarin)(?:\s|$)/i.test(lower)) tanggal = tgAddDays_(ctx.today, -2);
+  else if (/(?:^|\s)kemarin(?:\s|$)/i.test(lower)) tanggal = tgAddDays_(ctx.today, -1);
+
+  let best = null;
+  TG_RULES.forEach(function (r) {
+    if (forced && r.j !== forced) return;
+    let score = 0;
+    r.words.forEach(function (w) { if (w.re.test(lower)) score += w.weight; });
+    if (score > 0 && (!best || score > best.score)) best = { rule: r, j: r.j, score: score };
+  });
+  (forced ? [forced] : ['pengeluaran', 'pemasukan']).forEach(function (j) {
+    (ctx.cats[j] || []).forEach(function (cat) {
+      const full = cat.toLowerCase();
+      const words = full.split(/[^a-z0-9]+/).filter(function (w) { return w.length >= 4; });
+      const score = tgHasWord_(lower, full) ? 20 : (words.some(function (w) { return tgHasWord_(lower, w); }) ? 12 : 0);
+      if (score && (!best || score > best.score)) best = { direct: cat, j: j, score: score };
+    });
+  });
+  const jenis = forced || (best ? best.j : 'pengeluaran');
+  const list = ctx.cats[jenis] || [];
+  let kategori = null;
+  if (best) kategori = best.direct || list.filter(function (c) { return best.rule.cat.test(c); })[0] || null;
+  const guessed = !!kategori;
+  if (!kategori) kategori = list.filter(function (c) { return /lain/i.test(c); })[0] || 'Lainnya';
+
+  let ket = rawNoGram;
+  if (amt) ket = ket.slice(0, amt.index) + ' ' + ket.slice(amt.index + amt.text.length);
+  ket = ket.replace(/^\s*\+/, '').replace(/(?:^|\s)(kemarin lusa|lusa kemarin|kemarin|hari ini|tadi|barusan)(?=\s|$)/gi, ' ')
+    .replace(/\s+/g, ' ').trim()
+    .replace(/^(abis|habis|baru|udah|sudah)\s+/i, '')
+    .replace(/\s+(harganya|harga|seharga|sebesar|totalnya|total|senilai|bayar|rp\.?)$/i, '')
+    .replace(/^[\s,.\-:]+|[\s,.\-:]+$/g, '').trim();
+  if (ket) ket = ket.charAt(0).toUpperCase() + ket.slice(1);
+  const p = { nominal: amt ? amt.value : 0, jenis: jenis, kategori: kategori, guessed: guessed, keterangan: ket.slice(0, 200),
+    tanggal: tanggal || ctx.today, gram: gram };
+  p.aset = tgLinkAsset_(p, raw, ctx);
+  return p;
+}
+
+/** Hubungkan ke aset: "dari X" (dibayar dari / ambil dari), "ke X" (setor), kategori bernama sama dana khusus, emas (gram), menabung. */
+function tgLinkAsset_(p, raw, ctx) {
+  const simpanan = ctx.assets.filter(function (a) { return a.jenis !== 'Kas utama' && a.nama; });
+  const low = ' ' + String(raw).toLowerCase().replace(/\s+/g, ' ') + ' ';
+  const keluar = p.jenis === 'pengeluaran';
+  const byLen = simpanan.slice().sort(function (a, b) { return b.nama.length - a.nama.length; });
+  const has = function (prefix) { return byLen.filter(function (a) { return low.indexOf(' ' + prefix + ' ' + a.nama.toLowerCase() + ' ') >= 0; })[0]; };
+  let a = has('dari');
+  if (a) return { asetId: a.id, gram: p.gram, arah: keluar ? 'bayar' : 'tarik' };
+  a = has('ke');
+  if (a) return { asetId: a.id, gram: p.gram, arah: keluar ? 'setor' : 'terima' };
+  a = simpanan.filter(function (x) { return x.nama.toLowerCase() === String(p.kategori || '').toLowerCase(); })[0];
+  if (a) return { asetId: a.id, gram: 0, arah: keluar ? 'bayar' : 'terima' };
+  if (p.gram) {
+    const emas = simpanan.filter(function (x) { return x.jenis === 'Emas'; })[0];
+    if (emas) return { asetId: emas.id, gram: p.gram, arah: keluar ? 'setor' : 'tarik' };
+  }
+  if ((keluar && TG_SAVING_RE.test(p.kategori || '')) || (!keluar && TG_WITHDRAW_RE.test(p.kategori || ''))) {
+    const pool = simpanan.filter(function (x) { return x.jenis !== 'Dana khusus' && x.jenis !== 'Emas'; });
+    if (pool.length === 1) return { asetId: pool[0].id, gram: 0, arah: keluar ? 'setor' : 'tarik' };
+  }
+  return null;
+}
+
+// ---------- mencatat ----------
+function tgRecord_(token, chatId, text) {
+  const ctx = tgCtx_();
+  const parts = tgSplit_(text);
+  const saved = [], gagal = [];
+  parts.forEach(function (part) {
+    const p = tgParse_(part, ctx);
+    if (!p.nominal) { gagal.push(part); return; }
+    const tx = { id: Utilities.getUuid(), jenis: p.jenis, tanggal: p.tanggal, kategori: p.kategori, keterangan: p.keterangan,
+      nominal: p.nominal, aset: p.aset };
+    withLock_(function () { return addTx_(tx); });
+    saved.push({ tx: tx, guessed: p.guessed });
+  });
+  if (saved.length) {
+    PropertiesService.getScriptProperties().setProperty(TG_P.lastTx, JSON.stringify(saved.map(function (s) { return s.tx.id; })));
+    const fresh = tgCtx_();
+    fresh.all = tgAllTx_();
+    saved.forEach(function (s) {
+      const kb = s.guessed ? tgButtons_(s.tx.id) : tgCatButtons_(s.tx.id, s.tx.jenis, fresh, true);
+      tgSend_(token, chatId, tgTxText_(s.tx, fresh, s.guessed), kb);
+    });
+  }
+  if (gagal.length) {
+    tgSend_(token, chatId, '🤔 Nominalnya tidak ketemu di: <i>' + tgH_(gagal.join(' / ')) + '</i>\nContoh: <i>makan siang 25rb</i> atau <i>bensin 50.000</i>. Ketik /bantuan untuk panduan.');
+  }
+}
+
+function tgButtons_(id) {
+  return [[{ text: '↩️ Batal', callback_data: 'x:' + id }, { text: '🏷️ Ganti kategori', callback_data: 'k:' + id }]];
+}
+
+function tgCatButtons_(id, jenis, ctx, withUndo) {
+  const list = (ctx.cats[jenis] || []).slice(0, 24);
+  const rows = [];
+  for (let i = 0; i < list.length; i += 2) {
+    rows.push(list.slice(i, i + 2).map(function (c, k) { return { text: tgEmoji_(c, jenis) + ' ' + c, callback_data: 'c:' + id + ':' + (i + k) }; }));
+  }
+  rows.push(withUndo ? [{ text: '↩️ Batal', callback_data: 'x:' + id }] : [{ text: '« Kembali', callback_data: 'b:' + id }]);
+  return rows;
+}
+
+function tgTxText_(tx, ctx, guessed) {
+  const masuk = tx.jenis === 'pemasukan';
+  const lines = [(masuk ? '💰 <b>Pemasukan ' : '✅ <b>Pengeluaran ') + tgRp_(tx.nominal) + '</b>',
+    tgEmoji_(tx.kategori, tx.jenis) + ' ' + tgH_(tx.kategori) + (tx.keterangan ? ' — ' + tgH_(tx.keterangan) : ''),
+    '📅 ' + tgDay_(tx.tanggal, ctx.today)];
+  if (tx.aset && tx.aset.asetId) {
+    const a = ctx.assets.filter(function (x) { return x.id === tx.aset.asetId; })[0];
+    if (a) {
+      const sisa = tgAssetValue_(a, ctx);
+      const kata = { setor: 'Masuk ke', bayar: 'Dibayar dari', tarik: 'Diambil dari', terima: 'Langsung masuk ke' }[tx.aset.arah] || 'Aset:';
+      lines.push('🏦 ' + kata + ' ' + tgH_(a.nama) + ' · saldo ' + tgRp_(sisa) +
+        (tx.aset.arah === 'bayar' || tx.aset.arah === 'terima' ? ' (uang harian tidak berubah)' : ''));
+    }
+  }
+  if (!masuk) {
+    const cyc = tgCycle_(tx.tanggal, ctx.settings.awalSiklus);
+    const plan = getPlans_()[cyc.from] || {};
+    const item = plan[tx.kategori];
+    if (item && item.jatah) {
+      const pakai = (ctx.all || []).filter(function (t) { return t.jenis === 'pengeluaran' && t.kategori === tx.kategori && t.tanggal >= cyc.from && t.tanggal <= cyc.to; })
+        .reduce(function (s, t) { return s + t.nominal; }, 0);
+      const sisa = item.jatah - pakai;
+      if (TG_SAVING_RE.test(tx.kategori)) lines.push('🎯 ' + tgH_(tx.kategori) + ' ' + cyc.label + ': ' + tgRp_(pakai) + ' dari ' + tgRp_(item.jatah) + (sisa <= 0 ? ' ✅' : ''));
+      else lines.push(sisa >= 0 ? '🎯 Sisa rencana ' + tgH_(tx.kategori) + ': <b>' + tgRp_(sisa) + '</b> dari ' + tgRp_(item.jatah)
+        : '⚠️ Rencana ' + tgH_(tx.kategori) + ' lewat <b>' + tgRp_(-sisa) + '</b> (jatah ' + tgRp_(item.jatah) + ')');
+    }
+  }
+  if (!guessed) lines.push('\n🏷️ Kategorinya belum ketebak, jadi masuk <b>' + tgH_(tx.kategori) + '</b>. Pilih yang benar:');
+  return lines.join('\n');
+}
+
+function tgAssetValue_(a, ctx) {
+  const ms = ctx.mutasi.filter(function (m) { return m.asetId === a.id && m.tanggal >= a.mulai; });
+  if (a.jenis === 'Emas') {
+    const g = a.gramAwal + ms.reduce(function (s, m) { return s + (m.gram || 0); }, 0);
+    return Math.round(g * a.harga);
+  }
+  return a.saldoAwal + ms.reduce(function (s, m) { return s + (m.nominal || 0); }, 0);
+}
+
+// ---------- tombol ----------
+function tgCallback_(token, cq) {
+  const props = PropertiesService.getScriptProperties();
+  const owner = props.getProperty(TG_P.owner);
+  const chatId = cq.message && cq.message.chat ? String(cq.message.chat.id) : '';
+  const answer = function (t) { tgApi_(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: t || '' }); };
+  if (!owner || String(cq.from && cq.from.id) !== owner || chatId !== owner) return answer('Bot ini privat.');
+  const m = String(cq.data || '').match(/^([xkcb]):([0-9a-f-]{36})(?::(\d+))?$/);
+  if (!m) return answer();
+  const id = m[2], msgId = cq.message.message_id;
+  const found = findById_(id);
+  if (!found) {
+    answer('Transaksi sudah tidak ada.');
+    return tgApi_(token, 'editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } });
+  }
+  const tx = rowToTx_(found.c, found.values, found.row);
+  const ctx = tgCtx_();
+  const link = ctx.mutasi.filter(function (x) { return x.ref === id; })[0];
+  const ARAH_OF = { Setor: 'setor', Bayar: 'bayar', Tarik: 'tarik', Terima: 'terima' };
+  tx.aset = link ? { asetId: link.asetId, gram: Math.abs(link.gram || 0), arah: ARAH_OF[link.jenis] || null } : null;
+  if (m[1] === 'x') {
+    withLock_(function () { return deleteTx_({ id: id }); });
+    answer('Dibatalkan');
+    return tgApi_(token, 'editMessageText', { chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
+      text: '↩️ <s>' + tgH_(tx.kategori + ' ' + tgRp_(tx.nominal) + (tx.keterangan ? ' — ' + tx.keterangan : '')) + '</s>\nDibatalkan, sudah dihapus dari sheet.' });
+  }
+  if (m[1] === 'k') {
+    answer();
+    return tgApi_(token, 'editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: tgCatButtons_(id, tx.jenis, ctx, false) } });
+  }
+  if (m[1] === 'b') {
+    answer();
+    return tgApi_(token, 'editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: tgButtons_(id) } });
+  }
+  // c: ganti kategori
+  const baru = (ctx.cats[tx.jenis] || [])[Number(m[3])];
+  if (!baru) return answer('Kategori tidak ditemukan.');
+  tx.kategori = baru;
+  if (!tx.aset) tx.aset = tgLinkAsset_({ jenis: tx.jenis, kategori: baru, gram: 0 }, '', ctx);
+  withLock_(function () { return updateTx_(tx); });
+  answer('Kategori: ' + baru);
+  const fresh = tgCtx_();
+  fresh.all = tgAllTx_();
+  return tgApi_(token, 'editMessageText', { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', text: tgTxText_(tx, fresh, true),
+    reply_markup: { inline_keyboard: tgButtons_(id) } });
+}
+
+function tgUndo_(token, chatId) {
+  const props = PropertiesService.getScriptProperties();
+  let ids = [];
+  try { ids = JSON.parse(props.getProperty(TG_P.lastTx) || '[]'); } catch (e) { ids = []; }
+  if (!ids.length) return tgSend_(token, chatId, 'Tidak ada catatan dari chat yang bisa dibatalkan. Hapus lewat aplikasi bila perlu.');
+  const hapus = [];
+  ids.forEach(function (id) {
+    const f = findById_(id);
+    if (!f) return;
+    const t = rowToTx_(f.c, f.values, f.row);
+    withLock_(function () { return deleteTx_({ id: id }); });
+    hapus.push(t.kategori + ' ' + tgRp_(t.nominal));
+  });
+  props.deleteProperty(TG_P.lastTx);
+  return tgSend_(token, chatId, hapus.length ? '↩️ Dihapus: ' + tgH_(hapus.join(', ')) : 'Catatan terakhir sudah tidak ada.');
+}
+
+// ---------- rekap ----------
+function tgRekap_() {
+  const ctx = tgCtx_();
+  const all = tgAllTx_();
+  const cyc = tgCycle_(ctx.today, ctx.settings.awalSiklus);
+  const inCyc = all.filter(function (t) { return t.tanggal >= cyc.from && t.tanggal <= cyc.to; });
+  const linkJ = {};
+  ctx.mutasi.forEach(function (m) { if (m.ref) linkJ[m.ref] = m.jenis; });
+  let masuk = 0, ambil = 0, keluar = 0, tabung = 0;
+  const perCat = {};
+  inCyc.forEach(function (t) {
+    if (t.jenis === 'pemasukan') {
+      masuk += t.nominal;
+      if (linkJ[t.id] === 'Tarik' || (!linkJ[t.id] && TG_WITHDRAW_RE.test(t.kategori))) ambil += t.nominal;
+    } else {
+      keluar += t.nominal;
+      if (linkJ[t.id] === 'Setor' || (!linkJ[t.id] && TG_SAVING_RE.test(t.kategori))) tabung += t.nominal;
+      else perCat[t.kategori] = (perCat[t.kategori] || 0) + t.nominal;
+    }
+  });
+  const L = ['📊 <b>Rekap ' + tgH_(cyc.label) + '</b>',
+    'Pemasukan: <b>' + tgRp_(masuk - ambil) + '</b>' + (ambil ? ' (+ ambil tabungan ' + tgRp_(ambil) + ')' : ''),
+    'Pengeluaran: <b>' + tgRp_(keluar - tabung) + '</b>',
+    'Ditabung: <b>' + tgRp_(tabung) + '</b>',
+    'Sisa uang: <b>' + tgRp_(masuk - keluar) + '</b>'];
+  const top = Object.keys(perCat).sort(function (a, b) { return perCat[b] - perCat[a]; }).slice(0, 6);
+  if (top.length) {
+    L.push('', '<b>Pengeluaran terbesar</b>');
+    top.forEach(function (k) { L.push(tgEmoji_(k, 'pengeluaran') + ' ' + tgH_(k) + ': ' + tgRp_(perCat[k])); });
+  }
+  const plan = getPlans_()[cyc.from] || {};
+  const pk = Object.keys(plan);
+  if (pk.length) {
+    L.push('', '<b>Rencana</b>');
+    pk.sort(function (a, b) { return plan[b].jatah - plan[a].jatah; }).slice(0, 12).forEach(function (k) {
+      const pakai = inCyc.filter(function (t) { return t.jenis === 'pengeluaran' && t.kategori === k; }).reduce(function (s, t) { return s + t.nominal; }, 0);
+      const j = plan[k].jatah, saving = TG_SAVING_RE.test(k);
+      const tanda = plan[k].lunas || (saving && pakai >= j) ? '✅' : pakai > j ? '⚠️' : '▫️';
+      L.push(tanda + ' ' + tgH_(k) + ': ' + tgRp_(pakai) + ' / ' + tgRp_(j) + (!saving && pakai <= j && !plan[k].lunas ? ' · sisa ' + tgRp_(j - pakai) : ''));
+    });
+  }
+  const hari = all.filter(function (t) { return t.tanggal === ctx.today && t.jenis === 'pengeluaran'; });
+  L.push('', 'Hari ini: ' + tgRp_(hari.reduce(function (s, t) { return s + t.nominal; }, 0)) + ' (' + hari.length + ' catatan) · /hariini');
+  return L.join('\n');
+}
+
+function tgToday_() {
+  const ctx = tgCtx_();
+  const list = tgAllTx_().filter(function (t) { return t.tanggal === ctx.today; });
+  if (!list.length) return 'Belum ada catatan hari ini.';
+  const keluar = list.filter(function (t) { return t.jenis === 'pengeluaran'; }).reduce(function (s, t) { return s + t.nominal; }, 0);
+  return '🗓️ <b>Hari ini</b>\n' + list.slice(-20).map(function (t) {
+    return (t.jenis === 'pemasukan' ? '+ ' : '− ') + tgEmoji_(t.kategori, t.jenis) + ' ' + tgH_(t.kategori) + (t.keterangan ? ' (' + tgH_(t.keterangan) + ')' : '') + ': ' + tgRp_(t.nominal);
+  }).join('\n') + '\n\nTotal pengeluaran: <b>' + tgRp_(keluar) + '</b>';
+}
+
+// ---------- format ----------
+const TG_EMOJI = [[/zakat/i, '🕌'], [/travel|liburan|wisata|jalan-jalan/i, '✈️'], [/makan|minum|kuliner|food|jajan/i, '🍜'],
+  [/transport|bensin|kendaraan/i, '🛵'], [/belanja|shopping/i, '🛍️'], [/tagihan|utilitas|listrik/i, '💡'], [/hiburan|rekreasi/i, '🎬'],
+  [/kesehatan|medis/i, '💊'], [/pendidikan|edukasi|sekolah/i, '📚'], [/sosial|donasi|amal/i, '🤝'], [/gaji/i, '💼'], [/bonus|thr/i, '🎁'],
+  [/freelance|proyek/i, '💻'], [/investasi|dividen|tabung|nabung/i, '📈'], [/asuransi/i, '🛡️'], [/pulsa|internet|kuota/i, '📶'],
+  [/langganan|claude|netflix|spotify/i, '🔁'], [/rumah|sewa|kos/i, '🏠'], [/cicilan|utang|hutang|kredit/i, '💳'], [/pakaian|fashion/i, '👕'],
+  [/orang ?tua|ortu|anak|keluarga/i, '👪']];
+function tgEmoji_(name, jenis) {
+  const hit = TG_EMOJI.filter(function (x) { return x[0].test(name || ''); })[0];
+  return hit ? hit[1] : (jenis === 'pemasukan' ? '💰' : '📦');
+}
+function tgRp_(n) {
+  n = Math.round(Number(n) || 0);
+  return (n < 0 ? '−' : '') + 'Rp ' + String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+function tgH_(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function tgDay_(ymd, today) {
+  if (ymd === today) return 'Hari ini';
+  if (ymd === tgAddDays_(today, -1)) return 'Kemarin';
+  return +ymd.slice(8, 10) + ' ' + TG_BLN[+ymd.slice(5, 7) - 1] + ' ' + ymd.slice(0, 4);
 }
