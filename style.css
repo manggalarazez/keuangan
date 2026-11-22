@@ -491,3 +491,14 @@ textarea.input { padding: 12px 14px; min-height: 80px; resize: vertical; }
 .dd-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .dd-item input { width: 18px; height: 18px; accent-color: var(--primary); }
 .dd-item span { flex: 1; }
+
+/* Bot Telegram (v2.2) */
+a.btn { text-decoration: none; }
+.tg-steps { margin: 6px 0 14px; padding-left: 20px; font-size: 14px; line-height: 1.55; color: var(--text); }
+.tg-steps li { margin-bottom: 8px; }
+.tg-steps a, .tg-note a { color: var(--primary); font-weight: 600; }
+.tg-note { background: #EEF1FA; border-radius: 12px; padding: 10px 12px; font-size: 12.5px; color: var(--text-2); line-height: 1.5; margin-top: 12px; }
+.tg-ok { background: var(--income-bg); color: #087a5c; border-radius: 12px; padding: 12px 14px; font-size: 14px; }
+.tg-ex { margin-top: 14px; font-size: 13px; color: var(--text-2); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tg-ex b { width: 100%; color: var(--text); }
+.tg-ex span { background: #EEF1FA; border-radius: 999px; padding: 5px 10px; color: var(--text); }
