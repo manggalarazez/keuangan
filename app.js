@@ -4,7 +4,7 @@
    ========================================================= */
 'use strict';
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.0.1';
 
 /* ---------------- Penyimpanan lokal ---------------- */
 const LS = {
@@ -1744,20 +1744,28 @@ function evalFinance() {
   const started = activeAssets().some(a => a.mulai <= before);
   const startVal = started ? totalAssets(before) : null;
   const liquidJenis = ['Bank', 'E-wallet', 'Tunai', 'Deposito'];
-  const liquid = activeAssets().filter(a => liquidJenis.includes(a.jenis)).reduce((s, a) => s + assetValue(a, now), 0);
+  const liquidCash = activeAssets().filter(a => liquidJenis.includes(a.jenis)).reduce((s, a) => s + assetValue(a, now), 0);
+  // Emas bisa dijual kembali dalam 1-2 hari; dihitung 90% nilainya (selisih harga jual-beli kembali).
+  const emasVal = activeAssets().filter(a => a.jenis === 'Emas').reduce((s, a) => s + assetValue(a, now), 0);
+  const emasCair = Math.round(emasVal * 0.9);
+  const liquid = liquidCash + emasCair;
   const kons = [];
   let r = cycleRange(addDays(cur.from, -1));
   for (let i = 0; i < 3; i++) { const st = cycleStats(r); if (st.n) kons.push(st.konsumsi); r = cycleRange(addDays(r.from, -1)); }
   let avgKons = kons.length ? kons.reduce((a, b) => a + b, 0) / kons.length : 0;
   let basis = `rata-rata pengeluaran ${kons.length} bulan terakhir, di luar tabungan`;
+  let basisBudget = false;
   if (!avgKons) {
-    const pl = planAll().filter(c => !SAVING_RE.test(c.kat)).reduce((s, c) => s + c.jatah, 0);
-    if (pl) { avgKons = pl; basis = 'rencana bulan ini, di luar pos tabungan'; }
-    else if (S.settings.budgetBulanan) { avgKons = S.settings.budgetBulanan; basis = 'budget bulanan'; }
+    // Rencana bulan ini; kalau belum ada, rencana terdekat (mis. Desember yang sudah disiapkan).
+    const keys = Object.keys(S.plans || {}).filter(k => Object.keys(S.plans[k] || {}).length).sort();
+    const pk = keys.includes(planKey()) ? planKey() : (keys.filter(k => k > planKey())[0] || keys[keys.length - 1]);
+    const pl = pk ? planAll(pk).filter(c => !SAVING_RE.test(c.kat)).reduce((s, c) => s + c.jatah, 0) : 0;
+    if (pl) { avgKons = pl; basis = `rencana ${cycleRange(parseYmd(pk)).label}, di luar pos tabungan`; }
+    else if (S.settings.budgetBulanan) { avgKons = S.settings.budgetBulanan; basis = 'budget bulanan'; basisBudget = true; }
   }
   const cs = cycleStats(cur);
   const target = planAll().filter(c => SAVING_RE.test(c.kat)).reduce((s, c) => s + c.jatah, 0);
-  return { total, started, startVal, delta: started ? total - startVal : null, liquid, avgKons, basis,
+  return { total, started, startVal, delta: started ? total - startVal : null, liquid, liquidCash, emasVal, emasCair, basisBudget, avgKons, basis,
     months: avgKons ? liquid / avgKons : null, cs, rate: cs.masuk - cs.diambil > 0 ? cs.ditabung / (cs.masuk - cs.diambil) : null, target };
 }
 
@@ -1845,8 +1853,8 @@ function evalCard(e) {
       <div class="bar thin" style="margin-top:8px"><div class="fill ${st === 'over' ? 'over' : st === 'warn-ok' ? 'warn' : 'done'}" style="width:${Math.min(100, m / 6 * 100)}%"></div><span class="pace" style="left:50%"></span></div>
       <div class="budget-msg">${m >= 6 ? 'Aman: simpanan likuid sudah menutup lebih dari 6 bulan pengeluaran. Kelebihannya bisa diarahkan ke tujuan jangka panjang.'
         : m >= 3 ? `Cukup (3–6 bulan). Tambah ${rp(e.avgKons * 6 - e.liquid)} untuk mencapai 6 bulan.`
-        : `Belum aman. Kurang ${rp(need3)} untuk minimal 3 bulan pengeluaran.`}</div>
-      <div class="hint">Simpanan likuid (bank, e-wallet, tunai, deposito) ${rp(e.liquid)} ÷ ${rp(e.avgKons)}/bulan (${esc(e.basis)}). Kas utama dan emas tidak dihitung.</div></div>`);
+        : `Belum aman. Kurang ${rp(need3)} untuk minimal 3 bulan pengeluaran.`}${e.emasVal && m >= 3 && e.liquidCash / e.avgKons < 3 ? ` Sebagian besar dalam bentuk emas; sisakan minimal 3 bulan (${rp(e.avgKons * 3)}) di tabungan karena harga emas bisa sedang turun saat perlu dijual.` : ''}</div>
+      <div class="hint">Dihitung dari tabungan/e-wallet/tunai ${rp(e.liquidCash)}${e.emasVal ? ` + emas ${rp(e.emasVal)} × 90% = ${rp(e.emasCair)}` : ''}, dibagi ${rp(e.avgKons)}/bulan (${esc(e.basis)}). Kas utama tidak dihitung karena dipakai untuk belanja bulan berjalan.${e.basisBudget ? ' Budget bulanan biasanya termasuk tabungan, jadi angka ini terlalu tinggi; isi Rencana (tanpa pos Menabung) supaya hitungannya pas.' : ''}</div></div>`);
   }
   if (e.cs.masuk || e.target) {
     const pct = e.target ? e.cs.ditabung / e.target : 0;
