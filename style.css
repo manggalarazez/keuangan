@@ -401,3 +401,87 @@ textarea.input { padding: 12px 14px; min-height: 80px; resize: vertical; }
 @media (min-width: 560px) {
   .view { padding-left: 24px; padding-right: 24px; }
 }
+
+/* ---------- Budget per kategori ---------- */
+.bar.thin { height: 7px; }
+.cb-card { padding: 6px 16px 14px; }
+.cb-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.cb-top { display: flex; align-items: center; gap: 10px; }
+.cb-top .cat-ava { width: 36px; height: 36px; border-radius: 12px; font-size: 18px; }
+.cb-name { flex: 1; min-width: 0; }
+.cb-name b { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-name span { font-size: 12px; color: var(--muted); }
+.cb-bar { margin-top: 8px; }
+.cb-lbl { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-2); margin-bottom: 4px; }
+.cb-lbl span:first-child { font-weight: 600; }
+.cb-foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--text-2); padding-top: 12px; }
+.cbe-sum { background: var(--grad-soft); border-radius: 16px; padding: 12px 14px; }
+.cbe-sum-row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+.cbe-sum-row.exp b, .cbe-sum-row.exp span { color: var(--expense); }
+.cbe-row { border: 1.5px solid var(--line); border-radius: 16px; padding: 12px; margin-top: 10px; transition: border-color .2s, background .2s; }
+.cbe-row.on { border-color: #B9B2FF; background: #FBFAFF; }
+.cbe-head { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+.cbe-head .cat-ava { width: 34px; height: 34px; border-radius: 11px; font-size: 17px; }
+.cbe-amt { display: flex; align-items: center; gap: 8px; margin-top: 10px; border-bottom: 2px solid var(--line); padding-bottom: 4px; }
+.cbe-amt:focus-within { border-color: var(--primary); }
+.cbe-amt > span:first-child { font-weight: 800; color: var(--muted); }
+.cbe-amt input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font-size: 20px; font-weight: 800; padding: 4px 0; }
+.cbe-week { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--text-2); flex-wrap: wrap; }
+.cbe-week input { width: 18px; height: 18px; accent-color: var(--primary); }
+.cbe-week [data-w] { margin-left: auto; font-weight: 700; color: var(--primary); }
+
+/* ---------- Rencana bulanan ---------- */
+.bar .fill.done { background: linear-gradient(90deg, #34D399, #0FB487); }
+.pl-card { padding: 14px 16px; }
+.pl-sum { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; background: var(--grad-soft); border-radius: 14px; padding: 10px 12px; margin-bottom: 4px; }
+.pl-sum div { display: flex; flex-direction: column; }
+.pl-sum span { font-size: 11px; color: var(--text-2); font-weight: 600; }
+.pl-sum b { font-size: 16px; font-weight: 800; }
+.pl-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: flex-start; }
+.pl-check { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #C7CCE0; display: grid; place-items: center; flex-shrink: 0; margin-top: 1px; color: #fff; transition: all .2s var(--ease); }
+.pl-check.on { background: #0FB487; border-color: #0FB487; }
+.pl-check svg { stroke-width: 3; }
+.pl-main { flex: 1; min-width: 0; }
+.pl-row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+.pl-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-item.lunas .pl-name { text-decoration: line-through; color: var(--muted); }
+.pl-amt { font-size: 13px; font-weight: 700; white-space: nowrap; }
+.pl-sub { font-size: 12px; color: var(--text-2); margin-top: 5px; }
+.pl-nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pl-nav > div { text-align: center; display: flex; flex-direction: column; }
+.pl-nav b { font-size: 17px; }
+.pl-nav span { font-size: 12px; color: var(--muted); }
+
+/* ---------- Aset ---------- */
+.asset-mini { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin-top: 14px; }
+.asset-mini .am-ic { width: 44px; height: 44px; border-radius: 14px; background: var(--grad-soft); display: grid; place-items: center; font-size: 22px; flex-shrink: 0; }
+.asset-mini .am-tx { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.asset-mini .am-tx span { font-size: 12px; color: var(--text-2); }
+.asset-mini .am-tx b { font-size: 17px; font-weight: 800; }
+.asset-mini > svg { color: var(--muted); }
+.comp-bar { display: flex; height: 10px; border-radius: 99px; overflow: hidden; margin-top: 16px; background: rgba(255,255,255,.2); }
+.comp-bar i { display: block; height: 100%; border-right: 2px solid rgba(255,255,255,.6); }
+.comp-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 10px; font-size: 12px; }
+.comp-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.comp-legend i { width: 9px; height: 9px; border-radius: 3px; border: 1px solid rgba(255,255,255,.8); }
+.ev-card { padding: 4px 16px; }
+.ev-row { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.ev-row:last-child { border-bottom: 0; }
+.ev-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ev-head b { font-size: 14px; }
+.asset-card { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.asset-card:last-child { border-bottom: 0; }
+.ac-top { display: flex; align-items: center; gap: 12px; }
+.ac-name { flex: 1; min-width: 0; }
+.ac-name b { display: block; font-size: 15px; }
+.ac-name span { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-val { font-size: 15px; white-space: nowrap; }
+.ac-acts { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; padding-left: 54px; }
+.ac-acts .chip { min-height: 34px; padding: 0 11px; font-size: 13px; }
+.as-row { border: 1.5px solid var(--line); border-radius: 16px; padding: 10px; margin-top: 10px; }
+.as-row .as-val { margin-top: 8px; }
+.as-row .icon-btn { width: 44px; height: 52px; box-shadow: none; flex-shrink: 0; }
+.rekap-table tr.muted td { color: var(--muted); }
+
+.as-lbls { margin-bottom: 4px; }
+.as-lbls span { flex: 1; font-size: 12px; color: var(--muted); font-weight: 600; }

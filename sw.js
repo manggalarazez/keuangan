@@ -3,7 +3,7 @@
      (stale-while-revalidate). Versi baru terlihat saat aplikasi dibuka berikutnya.
    - Font Google: cache-first.
    - Permintaan ke Apps Script (script.google.com) TIDAK disentuh. */
-const CACHE = 'keuangan-v1.0.0';
+const CACHE = 'keuangan-v2.0.0';
 const SHELL = ['./', './index.html', './style.css', './app.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 

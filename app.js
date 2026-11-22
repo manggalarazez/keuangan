@@ -4,12 +4,13 @@
    ========================================================= */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '2.0.0';
 
 /* ---------------- Penyimpanan lokal ---------------- */
 const LS = {
   cfg: 'kw.cfg', tx: 'kw.tx', queue: 'kw.queue', settings: 'kw.settings', sheetCats: 'kw.sheetCats',
-  lastSync: 'kw.lastSync', pin: 'kw.pin', settingsDirty: 'kw.settingsDirty', ui: 'kw.ui'
+  lastSync: 'kw.lastSync', pin: 'kw.pin', settingsDirty: 'kw.settingsDirty', ui: 'kw.ui',
+  plans: 'kw.plans', plansDirty: 'kw.plansDirty', assets: 'kw.assets', mutasi: 'kw.mutasi'
 };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -22,15 +23,16 @@ const DEFAULT_SETTINGS = {
   budgetMingguan: 750000,
   awalSiklus: 1,
   kategori: {
-    pemasukan: ['Gaji', 'Bonus', 'Freelance', 'Hasil Investasi', 'Lainnya'],
-    pengeluaran: ['Makanan & Minuman', 'Transportasi', 'Belanja', 'Tagihan & Utilitas',
-      'Hiburan', 'Kesehatan', 'Pendidikan', 'Sosial & Donasi', 'Lainnya']
-  }
+    pemasukan: ['Gaji', 'Bonus', 'Freelance', 'Hasil Investasi', 'Ambil dari Tabungan', 'Lainnya'],
+    pengeluaran: ['Makanan & Minuman', 'Transportasi', 'Belanja', 'Tagihan & Utilitas', 'Orang Tua',
+      'Hiburan', 'Kesehatan', 'Pendidikan', 'Sosial & Donasi', 'Menabung', 'Lainnya']
+  },
+  budgetKategori: {} // { "Makanan & Minuman": { bulanan: 1500000, mingguan: true } }
 };
 
 /* ---------------- State ---------------- */
 const S = {
-  cfg: null, tx: [], queue: [], settings: null, sheetCats: {}, pin: null,
+  cfg: null, tx: [], queue: [], settings: null, sheetCats: {}, pin: null, plans: {}, plansDirty: [], assets: [], mutasi: [],
   lastSync: 0, settingsDirty: false, syncError: null, pulling: false,
   view: 'home', homePeriod: 'month', statsPeriod: 'month', custom: { home: null, stats: null },
   hist: { q: '', jenis: 'all', kat: 'all', per: 'all', limit: 80 }
@@ -45,10 +47,15 @@ function loadState() {
   S.pin = store.get(LS.pin, null);
   S.lastSync = store.get(LS.lastSync, 0);
   S.settingsDirty = store.get(LS.settingsDirty, false);
+  S.plans = store.get(LS.plans, {});
+  S.plansDirty = store.get(LS.plansDirty, []);
+  S.assets = store.get(LS.assets, []);
+  S.mutasi = store.get(LS.mutasi, []);
   const ui = store.get(LS.ui, {});
   if (ui.homePeriod && ui.homePeriod !== 'custom') S.homePeriod = ui.homePeriod;
 }
 const saveTx = () => store.set(LS.tx, S.tx);
+const saveAssetsLocal = () => { store.set(LS.assets, S.assets); store.set(LS.mutasi, S.mutasi); };
 const saveQueue = () => store.set(LS.queue, S.queue.map(o => { const c = Object.assign({}, o); delete c.inflight; return c; }));
 const saveSettingsLocal = () => { store.set(LS.settings, S.settings); store.set(LS.settingsDirty, S.settingsDirty); };
 
@@ -62,8 +69,20 @@ function normSettings(s) {
     kategori: {
       pemasukan: Array.isArray(k.pemasukan) && k.pemasukan.length ? k.pemasukan : DEFAULT_SETTINGS.kategori.pemasukan.slice(),
       pengeluaran: Array.isArray(k.pengeluaran) && k.pengeluaran.length ? k.pengeluaran : DEFAULT_SETTINGS.kategori.pengeluaran.slice()
-    }
+    },
+    budgetKategori: normCatBudget(s.budgetKategori)
   };
+}
+function normCatBudget(bk) {
+  const out = {};
+  if (bk && typeof bk === 'object') {
+    Object.keys(bk).forEach(kat => {
+      const v = bk[kat] || {};
+      const bulanan = Math.max(0, Math.round(Number(v.bulanan) || 0));
+      if (bulanan > 0) out[kat] = { bulanan, mingguan: v.mingguan !== false };
+    });
+  }
+  return out;
 }
 
 /* ---------------- Ikon (SVG garis) ---------------- */
@@ -175,13 +194,16 @@ function elapsedDays(r) {
 }
 
 /* ---------------- Kategori & tampilan ---------------- */
+const SAVING_RE = /tabung|menabung|investasi|dana darurat|emas/i; // pos yang sebenarnya uang disisihkan, bukan habis
+const WITHDRAW_RE = /ambil|tarik|cair|jual emas|dari tabungan/i; // pemasukan yang berasal dari aset sendiri
 const PALETTE = ['#6366F1', '#14B8A6', '#F59E0B', '#EC4899', '#0EA5E9', '#8B5CF6', '#10B981', '#F43F5E', '#64748B', '#84CC16', '#06B6D4', '#A855F7'];
 const CAT_EMOJI = [
+  [/zakat/i, '🕌'],
   [/makan|minum|kuliner|food|jajan/i, '🍜'], [/transport|bensin|kendaraan/i, '🛵'], [/belanja|shopping/i, '🛍️'],
   [/tagihan|utilitas|listrik/i, '💡'], [/hiburan|rekreasi/i, '🎬'], [/kesehatan|medis/i, '💊'],
   [/pendidikan|edukasi|sekolah/i, '📚'], [/sosial|donasi|amal|zakat/i, '🤝'], [/gaji/i, '💼'],
-  [/bonus|thr/i, '🎁'], [/freelance|proyek/i, '💻'], [/investasi|dividen|tabungan/i, '📈'],
-  [/rumah|sewa|kos/i, '🏠'], [/cicilan|utang|hutang|kredit/i, '💳'], [/pakaian|fashion/i, '👕'], [/anak|keluarga/i, '👪']
+  [/bonus|thr/i, '🎁'], [/freelance|proyek/i, '💻'], [/investasi|dividen|tabung|nabung/i, '📈'], [/asuransi/i, '🛡️'], [/pulsa|internet|kuota/i, '📶'], [/langganan|claude|netflix|spotify/i, '🔁'],
+  [/rumah|sewa|kos/i, '🏠'], [/cicilan|utang|hutang|kredit/i, '💳'], [/pakaian|fashion/i, '👕'], [/orang ?tua|ortu|anak|keluarga/i, '👪']
 ];
 function catEmoji(name, jenis) {
   const hit = CAT_EMOJI.find(([re]) => re.test(name || ''));
@@ -210,11 +232,14 @@ const SMART_RULES = [
   { j: 'pengeluaran', cat: /hiburan|rekreasi/i, kw: 'nonton|bioskop|cinema|xxi|cgv|netflix|spotify|youtube premium|disney|vidio|game|top up|voucher game|steam|liburan|wisata|rekreasi|karaoke|konser|hotel|staycation|jalan-jalan|jalan jalan|nongkrong|hobi' },
   { j: 'pengeluaran', cat: /kesehatan|medis/i, kw: 'obat|dokter|apotek|apotik|klinik|rumah sakit|puskesmas|vitamin|suplemen|periksa|cek darah|lab|gigi|kacamata|masker|terapi|pijat|gym|fitness' },
   { j: 'pengeluaran', cat: /pendidikan|edukasi|sekolah/i, kw: 'buku|kursus|kuliah|ukt|spp|sekolah|les|seminar|webinar|pelatihan|sertifikasi|ujian|alat tulis|fotokopi|print|udemy|coursera' },
+  { j: 'pengeluaran', cat: /tabung|menabung|investasi|dana darurat/i, kw: 'nabung|menabung|tabungan|investasi|reksadana|deposito|dana darurat|beli emas|emas antam' },
+  { j: 'pengeluaran', cat: /orang ?tua|ortu|keluarga/i, kw: 'ortu|orang tua|orangtua|kirim mama|kirim ibu|kirim bapak|kirim ayah|kirim papa|transfer ortu|transfer mama|transfer ibu|uang bulanan ortu|jatah ortu' },
   { j: 'pengeluaran', cat: /sosial|donasi|amal|zakat/i, kw: 'sedekah|zakat|infak|infaq|donasi|kondangan|sumbangan|arisan|amplop|kado|traktir|kolekte|perpuluhan|persembahan' },
   { j: 'pemasukan', cat: /gaji/i, kw: 'gaji|gajian|salary|upah' },
   { j: 'pemasukan', cat: /bonus|thr/i, kw: 'bonus|thr|insentif|tunjangan|komisi' },
   { j: 'pemasukan', cat: /freelance|proyek|project/i, kw: 'freelance|proyek|project|fee|honor|honorarium|jasa|klien|client' },
   { j: 'pemasukan', cat: /investasi|dividen/i, kw: 'dividen|bunga deposito|bunga|imbal hasil|kupon|reksadana|saham|profit|cuan' },
+  { j: 'pemasukan', cat: /ambil|tarik|cair|tabung/i, kw: 'ambil tabungan|ambil dari tabungan|tarik tabungan|pencairan|cairkan|jual emas|pakai tabungan|pakai dana darurat|ambil dana darurat' },
   { j: 'pemasukan', cat: /lain/i, kw: 'jual|penjualan|terima|diterima|dapat|dapet|cashback|refund|transfer masuk|uang masuk|pemasukan|kiriman' }
 ];
 const LOW_WEIGHT = { beli: 2, token: 3, tol: 4 };
@@ -253,7 +278,10 @@ function parseSmart(text, forcedJenis) {
   if (!raw) return null;
   if (!forcedJenis && raw.startsWith('+')) forcedJenis = 'pemasukan';
   const lower = raw.toLowerCase();
-  const amt = extractAmount(raw);
+  const gm = raw.match(/(\d+(?:[.,]\d+)?)\s*(?:gram|gr|g)(?![a-z0-9])/i);
+  const gram = gm ? Number(gm[1].replace(',', '.')) : 0;
+  const rawNoGram = gm ? raw.replace(gm[0], ' ') : raw;
+  const amt = extractAmount(rawNoGram);
 
   let tanggal = null;
   if (/(?:^|\s)kemarin(?:\s|$)/i.test(lower)) tanggal = ymd(addDays(today(), -1));
@@ -284,11 +312,11 @@ function parseSmart(text, forcedJenis) {
       kategori = list.find(c => best.rule.cat.test(c)) || list.find(c => /lain/i.test(c)) || null;
     }
   }
-  let ket = raw;
+  let ket = rawNoGram;
   if (amt) ket = ket.slice(0, amt.index) + ' ' + ket.slice(amt.index + amt.text.length);
   ket = ket.replace(/^\s*\+/, '').replace(/(?:^|\s)(kemarin|hari ini)(?=\s|$)/gi, ' ').replace(/\s+/g, ' ').replace(/^[\s,.\-:]+|[\s,.\-:]+$/g, '').trim();
   if (ket) ket = ket.charAt(0).toUpperCase() + ket.slice(1);
-  return { nominal: amt ? amt.value : 0, kategori, jenis, keterangan: ket, tanggal, guessed: !!best };
+  return { nominal: amt ? amt.value : 0, kategori, jenis, keterangan: ket, tanggal, gram, guessed: !!best };
 }
 
 /* ---------------- Komunikasi dengan Apps Script ---------------- */
@@ -317,7 +345,7 @@ async function apiCall(action, payload = {}, cfg = S.cfg) {
   return j.data;
 }
 
-const opId = op => (op.type === 'delete' ? op.id : op.tx.id);
+const opId = op => op.key || (op.type === 'delete' ? op.id : op.tx.id);
 function enqueue(op) {
   const id = opId(op);
   const i = S.queue.findIndex(o => opId(o) === id && !o.inflight);
@@ -343,9 +371,9 @@ async function processQueue() {
       const op = S.queue[0];
       op.inflight = true;
       try {
-        const res = await apiCall(op.type, op.type === 'delete' ? { id: op.id } : op.tx);
+        const res = await apiCall(op.type, op.payload || (op.type === 'delete' ? { id: op.id } : op.tx));
         S.queue.splice(S.queue.indexOf(op), 1);
-        if (op.type !== 'delete') {
+        if (op.tx) {
           const t = S.tx.find(x => x.id === op.tx.id);
           if (t && !isPending(t.id)) { delete t._pending; if (res && res.seq) t.seq = res.seq; }
         }
@@ -376,6 +404,10 @@ async function pull(silent) {
       const info = await apiCall('saveSettings', S.settings);
       S.settingsDirty = false; applyInfo(info);
     }
+    for (const k of S.plansDirty.slice()) {
+      await apiCall('savePlan', { periode: k, items: S.plans[k] || {} });
+      S.plansDirty = S.plansDirty.filter(x => x !== k); store.set(LS.plansDirty, S.plansDirty);
+    }
     const d = await apiCall('sync');
     applyInfo(d.info);
     let list = (d.transaksi || []).map(normTx).filter(t => t.id);
@@ -386,6 +418,11 @@ async function pull(silent) {
         const t = Object.assign({}, op.tx, { _pending: true });
         if (i >= 0) list[i] = t; else list.push(t);
       }
+    }
+    if (d.aset) {
+      S.assets = d.aset.aset || []; S.mutasi = d.aset.mutasi || [];
+      for (const op of S.queue) applyAssetOpLocal(op);
+      saveAssetsLocal();
     }
     S.tx = list; S.lastSync = Date.now(); S.syncError = null;
     saveTx(); store.set(LS.lastSync, S.lastSync);
@@ -404,6 +441,11 @@ function applyInfo(info) {
   S.sheetCats = info.kategoriSheet || {};
   store.set(LS.sheetCats, S.sheetCats);
   if (!S.settingsDirty && info.settings) { S.settings = normSettings(info.settings); saveSettingsLocal(); }
+  if (info.rencana && typeof info.rencana === 'object') {
+    const merged = Object.assign({}, info.rencana);
+    S.plansDirty.forEach(k => { if (S.plans[k]) merged[k] = S.plans[k]; else delete merged[k]; });
+    S.plans = merged; store.set(LS.plans, S.plans);
+  }
 }
 
 const normTx = t => ({
@@ -413,17 +455,18 @@ const normTx = t => ({
 
 /* ---------------- Operasi transaksi ---------------- */
 async function commitTx(tx, isEdit) {
-  const before = { m: budgetEval('month').status, w: budgetEval('week').status };
+  const before = { m: budgetEval('month').status, w: budgetEval('week').status, c: tx.jenis === 'pengeluaran' ? planEval(tx.kategori) : null };
   const clean = normTx(tx);
   const i = S.tx.findIndex(t => t.id === clean.id);
   const local = S.cfg.mode !== 'sheets';
   if (i >= 0) { clean.seq = S.tx[i].seq; S.tx[i] = Object.assign(clean, local ? {} : { _pending: true }); }
   else { clean.seq = Date.now(); S.tx.push(Object.assign(clean, local ? {} : { _pending: true })); }
-  saveTx(); refreshView();
+  linkTxMutasi(Object.assign({}, clean, { aset: tx.aset || null }));
+  saveTx(); saveAssetsLocal(); refreshView();
 
   const t = toast(local ? 'Tersimpan di HP' : 'Menyimpan ke Google Sheets…', local ? 'ok' : 'load', local ? 2200 : 0);
   if (!local) {
-    enqueue({ type: isEdit ? 'update' : 'add', tx: Object.assign({}, clean, { _pending: undefined }) });
+    enqueue({ type: isEdit ? 'update' : 'add', tx: Object.assign({}, clean, { _pending: undefined, aset: tx.aset || null }) });
     const r = await processQueue();
     if (r.ok) t.update(isEdit ? 'Perubahan tersimpan ke Sheets' : 'Tersimpan ke Google Sheets', 'ok', 2200);
     else if (r.offline) t.update('Tersimpan di HP · dikirim otomatis saat online', 'warn', 3500);
@@ -436,7 +479,8 @@ async function removeTx(id) {
   const i = S.tx.findIndex(t => t.id === id);
   if (i < 0) return;
   const before = S.tx[i];
-  S.tx.splice(i, 1); saveTx(); refreshView();
+  S.tx.splice(i, 1); saveTx();
+  linkTxMutasi({ id, aset: null }); saveAssetsLocal(); refreshView();
   if (S.cfg.mode !== 'sheets') { toast('Transaksi dihapus', 'ok'); return; }
   enqueue({ type: 'delete', id, jenis: before.jenis });
   const t = toast('Menghapus dari Sheets…', 'load', 0);
@@ -488,8 +532,51 @@ function budgetEval(kind) {
 }
 const STATUS_TXT = { safe: 'Aman', warn: 'Mendekati Batas', over: 'Over-Budget', none: 'Belum diatur' };
 
+/* ----- Rencana bulanan per kategori -----
+   Tiap siklus bulan punya rencananya sendiri: { kategori: { jatah, mingguan, lunas } }.
+   Kunci periode = tanggal mulai siklus (YYYY-MM-DD). Bulan baru dimulai kosong.
+   "Lunas" otomatis bila transaksi kategori itu sudah mencapai jatah, atau ditandai manual. */
+const planKey = (d = today()) => ymd(cycleRange(d).from);
+const planOf = key => (S.plans && S.plans[key]) || {};
+const weeklyShare = (jatah, r = cycleRange()) => Math.round(jatah * 7 / (diffDays(r.from, r.to) + 1));
+function planEval(kat, key = planKey()) {
+  const b = planOf(key)[kat];
+  if (!b || !(b.jatah > 0)) return null;
+  const mr = cycleRange(parseYmd(key));
+  const weekly = !!b.mingguan && key === planKey();
+  const sumIn = r => S.tx.reduce((s, t) => s + (t.jenis === 'pengeluaran' && t.kategori === kat && inRange(t, r) ? t.nominal : 0), 0);
+  const mSpent = sumIn(mr);
+  const mingguan = weekly ? weeklyShare(b.jatah, mr) : 0;
+  const wSpent = weekly ? sumIn(weekRange()) : 0;
+  const pctM = mSpent / b.jatah, pctW = mingguan ? wSpent / mingguan : 0;
+  const autoLunas = mSpent >= b.jatah;
+  // Pos tabungan: melebihi rencana itu bagus, jadi tidak dianggap "lebih".
+  const over = !SAVING_RE.test(kat) && (mSpent > b.jatah || (weekly && wSpent > mingguan));
+  const lunas = !over && (autoLunas || !!b.lunas);
+  const status = over ? 'over' : lunas ? 'lunas' : (pctM >= 0.8 || pctW >= 0.8) ? 'warn' : 'safe';
+  const focus = weekly && pctW >= pctM ? 'week' : 'month';
+  return { kat, jatah: b.jatah, mingguan, weekly, mSpent, wSpent, pctM, pctW, status, focus, autoLunas, manual: !!b.lunas,
+    sisaM: b.jatah - mSpent, sisaW: mingguan - wSpent };
+}
+const planAll = (key = planKey()) => Object.keys(planOf(key)).map(k => planEval(k, key)).filter(Boolean);
+
 function budgetAlert(before) {
-  const rank = { none: 0, safe: 0, warn: 1, over: 2 };
+  const rank = { none: 0, safe: 0, lunas: 0, warn: 1, over: 2 };
+  // Rencana per kategori lebih spesifik, jadi diperiksa dulu.
+  if (before.c) {
+    const c = planEval(before.c.kat);
+    if (c && c.status === 'lunas' && before.c.status !== 'lunas') {
+      setTimeout(() => toast(`${c.kat}: lunas sesuai rencana`, 'ok', 3000), 900);
+      return;
+    }
+    if (c && rank[c.status] > rank[before.c.status]) {
+      const w = c.focus === 'week';
+      setTimeout(() => toast(c.status === 'over'
+        ? `${c.kat} melebihi rencana ${w ? 'minggu' : 'bulan'} ini (lebih ${rp(-(w ? c.sisaW : c.sisaM))})`
+        : `${c.kat} sudah ${Math.round((w ? c.pctW : c.pctM) * 100)}% dari rencana · sisa ${rp(w ? c.sisaW : c.sisaM)}`, c.status === 'over' ? 'err' : 'warn', 4500), 900);
+      return;
+    }
+  }
   const now = { m: budgetEval('month'), w: budgetEval('week') };
   const hit = [['m', 'bulanan'], ['w', 'mingguan']].find(([k]) => rank[now[k].status] > rank[before[k]]);
   if (!hit) return;
@@ -497,6 +584,31 @@ function budgetAlert(before) {
   setTimeout(() => toast(e.status === 'over'
     ? `Budget ${hit[1]} terlampaui (${Math.round(e.pct * 100)}%)`
     : `Budget ${hit[1]} sudah ${Math.round(e.pct * 100)}% · sisa ${rp(e.sisa)}`, e.status === 'over' ? 'err' : 'warn', 4500), 900);
+}
+
+/** Simpan rencana satu periode (lokal dulu, lalu ke server). */
+async function savePlan(key, items) {
+  if (Object.keys(items).length) S.plans[key] = items; else delete S.plans[key];
+  store.set(LS.plans, S.plans);
+  if (S.cfg.mode === 'sheets') {
+    if (!S.plansDirty.includes(key)) S.plansDirty.push(key);
+    store.set(LS.plansDirty, S.plansDirty);
+    try {
+      const info = await apiCall('savePlan', { periode: key, items });
+      S.plansDirty = S.plansDirty.filter(k => k !== key); store.set(LS.plansDirty, S.plansDirty);
+      applyInfo(info);
+    } catch (e) { toast('Rencana disimpan di HP · dikirim ke server saat online', 'warn', 3200); }
+  }
+  refreshView();
+}
+async function togglePlanLunas(kat) {
+  const key = planKey(), plan = Object.assign({}, planOf(key)), b = plan[kat];
+  if (!b) return;
+  const ev = planEval(kat);
+  if (ev && ev.autoLunas && !b.lunas) return toast('Sudah tercentang otomatis: transaksi mencapai jatah', 'ok', 2400);
+  plan[kat] = Object.assign({}, b, { lunas: !b.lunas });
+  await savePlan(key, plan);
+  toast(plan[kat].lunas ? `${kat} ditandai lunas` : `Tanda lunas ${kat} dibatalkan`, 'ok', 1800);
 }
 
 /* ---------------- Toast & dialog ---------------- */
@@ -549,7 +661,7 @@ function closeSheet(fromPop) {
 window.addEventListener('popstate', () => { if (sheetOpen) closeSheet(true); });
 
 /* ---------------- Navigasi & render ---------------- */
-const NAV = { home: ['home', 'Beranda'], history: ['list', 'Riwayat'], stats: ['chart', 'Statistik'], settings: ['settings', 'Atur'] };
+const NAV = { home: ['home', 'Beranda'], history: ['list', 'Riwayat'], assets: ['wallet', 'Aset'], stats: ['chart', 'Statistik'], settings: ['settings', 'Atur'] };
 function renderNav() {
   $$('.nav-btn').forEach(b => {
     const [i, l] = NAV[b.dataset.nav];
@@ -566,7 +678,7 @@ function go(view) {
 }
 function render(animate) {
   const v = $('#view');
-  const fn = { home: renderHome, history: renderHistory, stats: renderStats, settings: renderSettings }[S.view] || renderHome;
+  const fn = { home: renderHome, history: renderHistory, assets: renderAssets, stats: renderStats, settings: renderSettings }[S.view] || renderHome;
   v.innerHTML = fn();
   if (animate) { v.style.animation = 'none'; void v.offsetWidth; v.style.animation = ''; }
   if (S.view === 'history') bindHistory();
@@ -637,6 +749,9 @@ function renderHome() {
 
   const banners = [];
   if (S.syncError === 'auth') banners.push(`<div class="banner over">${ico('lock')}<div><b>Token tidak cocok</b>Data tidak bisa disinkronkan. Periksa token di menu Atur.<br><button class="act" data-action="open-conn">Perbaiki koneksi</button></div></div>`);
+  const plan = planAll();
+  const planOver = plan.filter(c => c.status === 'over');
+  if (planOver.length) banners.push(`<div class="banner over">${ico('alert')}<div><b>${planOver.length} pos melebihi rencana</b>${esc(planOver.map(c => c.kat).join(', '))}. Tahan dulu pengeluaran di pos ini.</div></div>`);
   const worst = [bm, bw].find(e => e.status === 'over') || [bm, bw].find(e => e.status === 'warn');
   if (worst) banners.push(`<div class="banner ${worst.status}">${ico('alert')}<div><b>Budget ${worst.kind === 'month' ? 'bulanan' : 'mingguan'}: ${STATUS_TXT[worst.status]}</b>${esc(worst.msg)}</div></div>`);
   const todayCount = S.tx.filter(t => t.tanggal === ymd(today())).length;
@@ -645,7 +760,7 @@ function renderHome() {
   return `
   <div class="topbar">
     <div><h1>${greet()} 👋</h1><div class="sub" data-sync-pill></div></div>
-    <button class="icon-btn ${S.pulling ? 'spin' : ''}" data-action="sync" aria-label="Sinkronkan">${ico('refresh')}</button>
+    <div style="display:flex;gap:8px"><button class="icon-btn ${S.pulling ? 'spin' : ''}" data-action="sync" aria-label="Sinkronkan">${ico('refresh')}</button><button class="icon-btn" data-nav-go="settings" aria-label="Pengaturan">${ico('settings')}</button></div>
   </div>
   ${banners.slice(0, 2).join('')}
   <section class="hero" aria-label="Ringkasan">
@@ -658,9 +773,13 @@ function renderHome() {
     ${periodChips('home', S.homePeriod, [['today', 'Hari'], ['week', 'Minggu'], ['month', 'Bulan'], ['custom', 'Custom']])}
   </section>
 
+  ${assetMiniCard()}
   <div class="section-title"><h2>Budget</h2><button class="link-btn" data-action="open-budget">Atur</button></div>
-  ${budgetCard(bm)}${budgetCard(bw)}
+  ${[bm, bw].filter(e => e.budget > 0).map(budgetCard).join('') || budgetCard(bm)}
   ${bm.budget > 0 || bw.budget > 0 ? '<div class="hint" style="margin:8px 4px 0">Garis tegak pada bar = batas ideal sampai hari ini.</div>' : ''}
+
+  <div class="section-title"><h2>Rencana ${esc(cycleRange().label)}</h2><button class="link-btn" data-action="open-plan">${plan.length ? 'Ubah' : 'Buat'}</button></div>
+  ${planBlock(plan)}
 
   <div class="section-title"><h2>Insight ${esc(r.label.toLowerCase())}</h2></div>
   <div class="grid2">
@@ -689,6 +808,47 @@ function budgetCard(e) {
     <div class="budget-meta"><span class="num">${e.sisa >= 0 ? 'Sisa ' + rp(e.sisa) : 'Lebih ' + rp(-e.sisa)}</span><span>${e.remain} hari lagi</span></div>
     <div class="budget-msg">${esc(e.msg)}</div>
   </div>`;
+}
+
+function planIncomeRef(r) {
+  const inc = sumOf(S.tx.filter(t => inRange(t, r)), 'pemasukan');
+  return inc > 0 ? { v: inc, lbl: 'pemasukan tercatat' } : { v: S.settings.budgetBulanan, lbl: 'budget bulanan' };
+}
+function planBlock(list) {
+  const mr = cycleRange();
+  if (!list.length) {
+    return `<div class="card"><p class="budget-msg" style="margin-top:0">Belum ada rencana untuk ${esc(mr.label)}. Isi jatah tiap pos (Orang Tua, Makan, Menabung, dan lainnya). Angkanya boleh berbeda tiap bulan.</p>
+      <button class="btn ghost sm" style="margin-top:10px" data-action="open-plan">${ico('target', 'sm')} Buat rencana ${esc(mr.label)}</button></div>`;
+  }
+  const total = list.reduce((a, c) => a + c.jatah, 0);
+  const used = list.reduce((a, c) => a + c.mSpent, 0);
+  const done = list.filter(c => c.status === 'lunas').length;
+  const ref = planIncomeRef(mr), free = ref.v - total;
+  const fillCls = st => (st === 'over' ? 'over' : st === 'warn' ? 'warn' : st === 'lunas' ? 'done' : '');
+  const rows = list.map(c => {
+    const sub = c.status === 'over'
+      ? `<span class="exp">Lebih ${rp(c.mSpent > c.jatah ? c.mSpent - c.jatah : c.wSpent - c.mingguan)}${c.mSpent > c.jatah ? '' : ' minggu ini'}</span>`
+      : c.status === 'lunas' ? `<span class="inc">${c.autoLunas ? 'Lunas' : 'Ditandai lunas'}</span>${c.autoLunas ? (c.mSpent > c.jatah ? ` · lebih ${rp(c.mSpent - c.jatah)} dari target` : '') : ` · tercatat ${rp(c.mSpent)}`}`
+      : `Sisa ${rp(c.sisaM)}`;
+    return `<div class="pl-item ${c.status}">
+      <button class="pl-check ${c.status === 'lunas' ? 'on' : ''}" data-action="plan-toggle" data-cat="${esc(c.kat)}" aria-label="Tandai ${esc(c.kat)} lunas">${c.status === 'lunas' ? ico('check', 'xs') : ''}</button>
+      <div class="pl-main">
+        <div class="pl-row"><span class="pl-name">${catEmoji(c.kat)} ${esc(c.kat)}</span><span class="num pl-amt">${rp(c.mSpent)}<span class="muted"> / ${rpShort(c.jatah)}</span></span></div>
+        <div class="bar thin"><div class="fill ${fillCls(c.status)}" style="width:${Math.min(100, c.pctM * 100)}%"></div></div>
+        <div class="pl-sub">${sub}</div>
+        ${c.weekly ? miniBar('Minggu ini', c.wSpent, c.mingguan, c.pctW >= 1 ? 'over' : c.pctW >= 0.8 ? 'warn' : '') : ''}
+      </div></div>`;
+  }).join('');
+  return `<div class="card pl-card">
+    <div class="pl-sum"><div><span>Rencana</span><b class="num">${rpShort(total)}</b></div><div><span>Terpakai</span><b class="num">${rpShort(used)}</b></div><div><span>Lunas</span><b class="num">${done}/${list.length}</b></div></div>
+    ${rows}
+    <div class="cb-foot"><span>Acuan: ${ref.lbl} <b class="num">${rp(ref.v)}</b></span>${ref.v > 0 ? `<span class="num ${free < 0 ? 'exp' : 'muted'}">${free >= 0 ? `${rp(free)} belum dialokasikan` : `rencana lebih ${rp(-free)}`}</span>` : ''}</div>
+    <div class="hint" style="margin-top:6px">Ketuk lingkaran untuk menandai lunas secara manual.</div></div>`;
+}
+function miniBar(label, spent, budget, st) {
+  const pct = budget > 0 ? spent / budget : 0;
+  return `<div class="cb-bar"><div class="cb-lbl"><span>${label}</span><span class="num">${rp(spent)} / ${rpShort(budget)} · ${spent <= budget ? 'sisa ' + rpShort(budget - spent) : 'lebih ' + rpShort(spent - budget)}</span></div>
+    <div class="bar thin"><div class="fill ${st}" style="width:${Math.min(100, pct * 100)}%"></div></div></div>`;
 }
 
 /* ---------- Riwayat ---------- */
@@ -753,7 +913,8 @@ function renderStats() {
   const cats = byCategory(list);
   const days = elapsedDays(r);
   const biggest = list.filter(t => t.jenis === 'pengeluaran').sort((a, b) => b.nominal - a.nominal)[0];
-  const savingRate = inc > 0 ? Math.round((inc - exp) / inc * 100) : null;
+  const saved = list.reduce((a, t) => a + (t.jenis === 'pengeluaran' && SAVING_RE.test(t.kategori) ? t.nominal : 0), 0);
+  const savingRate = inc > 0 ? Math.round((inc - exp + saved) / inc * 100) : null;
 
   // Bandingkan dengan periode sebelumnya pada hari yang setara
   let compare = '';
@@ -778,7 +939,7 @@ function renderStats() {
     <div class="mini"><div class="k">Total pengeluaran</div><div class="v num exp">${rp(exp)}</div><div class="s">${list.filter(t => t.jenis === 'pengeluaran').length} transaksi</div></div>
     <div class="mini"><div class="k">Rata-rata harian</div><div class="v num">${rp(exp / Math.max(1, days))}</div><div class="s">dari ${days} hari</div></div>
     <div class="mini"><div class="k">Transaksi terbesar</div><div class="v num">${biggest ? rp(biggest.nominal) : '–'}</div><div class="s">${biggest ? esc(biggest.keterangan || biggest.kategori) : 'Belum ada'}</div></div>
-    <div class="mini"><div class="k">Rasio tabungan</div><div class="v num ${savingRate == null ? '' : savingRate >= 0 ? 'inc' : 'exp'}">${savingRate == null ? '–' : savingRate + '%'}</div><div class="s">${savingRate == null ? 'Belum ada pemasukan' : 'dari pemasukan periode ini'}</div></div>
+    <div class="mini"><div class="k">Rasio tabungan</div><div class="v num ${savingRate == null ? '' : savingRate >= 0 ? 'inc' : 'exp'}">${savingRate == null ? '–' : savingRate + '%'}</div><div class="s">${savingRate == null ? 'Belum ada pemasukan' : saved ? 'termasuk pos tabungan' : 'dari pemasukan periode ini'}</div></div>
   </div>
 
   <div class="section-title"><h2>Pengeluaran per kategori</h2></div>
@@ -887,7 +1048,7 @@ function renderSettings() {
   const hasSample = S.tx.some(t => t._sample);
   const row = (action, icon, title, sub, extra = '') => `<button class="set-row" data-action="${action}" ${extra}><span class="ic">${ico(icon, 'sm')}</span><span class="tx2"><b>${title}</b><span>${sub}</span></span><span class="chev">${ico('chev', 'sm')}</span></button>`;
   return `
-  <div class="topbar"><div><h1>Pengaturan</h1><div class="sub" data-sync-pill></div></div></div>
+  <div class="topbar"><div style="display:flex;align-items:center;gap:10px"><button class="icon-btn" data-nav-go="home" aria-label="Kembali">${ico('back')}</button><div><h1>Pengaturan</h1><div class="sub" data-sync-pill></div></div></div></div>
 
   <div class="section-title" style="margin-top:8px"><h2>Koneksi data</h2></div>
   <div class="set-group">
@@ -898,6 +1059,7 @@ function renderSettings() {
   <div class="section-title"><h2>Budget</h2></div>
   <div class="set-group">
     ${row('open-budget', 'target', 'Budget bulanan & mingguan', `${rp(s.budgetBulanan)} / bulan · ${rp(s.budgetMingguan)} / minggu`)}
+    ${(() => { const pl = planAll(); return row('open-plan', 'tag', `Rencana ${esc(cycleRange().label)}`, pl.length ? `${pl.length} pos · total ${rp(pl.reduce((a, c) => a + c.jatah, 0))}` : 'Belum dibuat · jatah per kategori, beda tiap bulan'); })()}
     ${row('open-budget', 'calendar', 'Siklus', `Bulan mulai tanggal ${s.awalSiklus} · minggu mulai Senin`)}
   </div>
 
@@ -913,6 +1075,11 @@ function renderSettings() {
     ${S.pin ? row('lock-now', 'lock', 'Kunci sekarang', 'Tampilkan layar PIN') : ''}
   </div>
 
+  <div class="section-title"><h2>Aset</h2></div>
+  <div class="set-group">
+    ${row('go-assets', 'wallet', 'Kelola aset & posisi keuangan', S.assets.filter(a => a.aktif).length ? `${S.assets.filter(a => a.aktif).length} aset · total ${rp(totalAssets())}` : 'Belum diisi · catat tabungan, emas, dan saldo awal')}
+  </div>
+
   <div class="section-title"><h2>Data</h2></div>
   <div class="set-group">
     ${row('export-csv', 'download', 'Ekspor CSV', `${S.tx.length} transaksi`)}
@@ -924,10 +1091,11 @@ function renderSettings() {
 
 /* ---------------- Form tambah / edit ---------------- */
 let F = null;
-function openTxForm(tx) {
+function openTxForm(tx, prefill) {
   const edit = !!tx;
   F = edit ? Object.assign({}, tx, { mode: 'edit', jenisTouched: true })
-    : { mode: 'add', id: uuid(), jenis: 'pengeluaran', nominal: 0, kategori: null, tanggal: ymd(today()), keterangan: '', jenisTouched: false };
+    : Object.assign({ mode: 'add', id: uuid(), jenis: 'pengeluaran', nominal: 0, kategori: null, tanggal: ymd(today()), keterangan: '', jenisTouched: false }, prefill || {});
+  if (edit) { const l = S.mutasi.find(m => m.ref === tx.id); F.aset = l ? { asetId: l.asetId, gram: Math.abs(l.gram || 0) } : null; }
   openSheet(`
     <div class="sheet-head"><h3>${edit ? 'Ubah transaksi' : 'Tambah transaksi'}</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
     <form class="sheet-body" id="tx-form" novalidate autocomplete="off">
@@ -941,6 +1109,11 @@ function openTxForm(tx) {
         <div class="err-msg" id="f-nominal-err" hidden></div>
         <div class="quick">${[10000, 20000, 25000, 50000, 100000, 500000].map(v => `<button type="button" data-q="${v}">${rpShort(v)}</button>`).join('')}</div></div>
       <div class="field"><span class="lbl">Kategori</span><div class="cat-grid" id="f-cats"></div><div class="err-msg" id="f-cat-err" hidden></div></div>
+      <div class="field" id="f-aset-field" hidden><label for="f-aset" id="f-aset-lbl">Aset terkait</label>
+        <select class="input" id="f-aset"></select>
+        <div class="date-row" id="f-gram-wrap" style="margin-top:8px" hidden><input class="input" id="f-gram" inputmode="decimal" placeholder="Jumlah gram, mis. 2,5"><span class="muted" style="align-self:center;font-weight:600">gram</span></div>
+        <div class="hint" id="f-aset-hint"></div></div>
+      <button type="button" class="link-btn" id="f-aset-link" hidden>+ Hubungkan ke aset (tabungan/emas)</button>
       <div class="field"><label for="f-tanggal">Tanggal</label><div class="date-row">
         <input class="input" type="date" id="f-tanggal" max="${ymd(addDays(today(), 366))}">
         <button type="button" class="btn ghost sm" data-d="0">Hari ini</button><button type="button" class="btn ghost sm" data-d="-1">Kemarin</button></div></div>
@@ -967,6 +1140,7 @@ function openTxForm(tx) {
       F.nominal = Number(digits) || 0;
       nom.value = digits ? nf.format(F.nominal) : '';
       clearErr('nominal');
+      updateAsetField();
     });
     nom.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTx(); } });
     tgl.addEventListener('change', () => { F.tanggal = tgl.value || ymd(today()); });
@@ -976,7 +1150,35 @@ function openTxForm(tx) {
     $$('.quick button', sh).forEach(b => b.addEventListener('click', () => { F.nominal = Number(b.dataset.q); nom.value = nf.format(F.nominal); clearErr('nominal'); }));
     $$('[data-d]', sh).forEach(b => b.addEventListener('click', () => { F.tanggal = ymd(addDays(today(), Number(b.dataset.d))); tgl.value = F.tanggal; }));
     $('#tx-form', sh).addEventListener('submit', e => { e.preventDefault(); submitTx(); });
+    $('#f-aset', sh).addEventListener('change', e => { F.aset = e.target.value ? { asetId: e.target.value, gram: (F.aset && F.aset.gram) || 0 } : null; updateAsetField(); });
+    $('#f-gram', sh).addEventListener('input', e => { if (F.aset) F.aset.gram = Number(String(e.target.value).replace(',', '.')) || 0; updateAsetField(); });
+    $('#f-aset-link', sh).addEventListener('click', () => { F.asetForce = true; updateAsetField(); });
+    updateAsetField();
   });
+}
+
+/** Tampilkan pilihan aset bila kategori = menabung (pengeluaran) / ambil tabungan (pemasukan), atau diminta. */
+function updateAsetField() {
+  const field = $('#f-aset-field');
+  if (!field || !F) return;
+  const simpanan = S.assets.filter(a => a.aktif && a.jenis !== KAS);
+  const auto = (F.jenis === 'pengeluaran' && SAVING_RE.test(F.kategori || '')) || (F.jenis === 'pemasukan' && WITHDRAW_RE.test(F.kategori || ''));
+  const show = simpanan.length > 0 && (auto || F.asetForce || (F.aset && F.aset.asetId));
+  field.hidden = !show;
+  $('#f-aset-link').hidden = show || !simpanan.length;
+  if (!show) return;
+  if (auto && !F.aset && simpanan.length === 1) F.aset = { asetId: simpanan[0].id, gram: 0 };
+  const sel = $('#f-aset');
+  const cur = F.aset ? F.aset.asetId : '';
+  sel.innerHTML = `<option value="">— Tidak dihubungkan —</option>` + simpanan.map(a => `<option value="${esc(a.id)}" ${a.id === cur ? 'selected' : ''}>${assetEmoji(a)} ${esc(a.nama)}</option>`).join('');
+  $('#f-aset-lbl').textContent = F.jenis === 'pengeluaran' ? 'Masuk ke aset (menabung)' : 'Diambil dari aset';
+  const a = S.assets.find(x => x.id === cur);
+  const gw = $('#f-gram-wrap');
+  gw.hidden = !(a && a.jenis === 'Emas');
+  if (!gw.hidden && document.activeElement !== $('#f-gram')) $('#f-gram').value = F.aset && F.aset.gram ? String(F.aset.gram).replace('.', ',') : '';
+  $('#f-aset-hint').textContent = a
+    ? `${a.nama} ${F.jenis === 'pengeluaran' ? 'bertambah' : 'berkurang'} ${F.nominal ? rp(F.nominal) : ''}${a.jenis === 'Emas' && F.aset && F.aset.gram ? ` (${String(F.aset.gram).replace('.', ',')} gram)` : ''}.`
+    : 'Pilih aset supaya saldo tabungan ikut tercatat.';
 }
 
 function setJenis(j, resetCat) {
@@ -984,6 +1186,7 @@ function setJenis(j, resetCat) {
   $$('#f-jenis [data-j]').forEach(b => { b.classList.toggle('on', b.dataset.j === j); b.classList.toggle('exp-on', j === 'pengeluaran'); b.classList.toggle('inc-on', j === 'pemasukan'); });
   if (resetCat && !categoriesFor(j).includes(F.kategori)) F.kategori = null;
   renderCatGrid();
+  updateAsetField();
   const btn = $('#f-save');
   if (btn) {
     btn.classList.toggle('inc-btn', j === 'pemasukan');
@@ -996,7 +1199,7 @@ function renderCatGrid() {
   const list = categoriesFor(F.jenis).slice();
   if (F.kategori && !list.includes(F.kategori)) list.push(F.kategori); // kategori lama yang tidak ada di daftar
   el.innerHTML = list.map(c => `<button type="button" class="cat-btn ${F.kategori === c ? 'on' : ''}" data-c="${esc(c)}"><span class="e">${catEmoji(c, F.jenis)}</span>${esc(c)}</button>`).join('');
-  el.onclick = e => { const b = e.target.closest('[data-c]'); if (!b) return; F.kategori = b.dataset.c; renderCatGrid(); clearErr('cat'); };
+  el.onclick = e => { const b = e.target.closest('[data-c]'); if (!b) return; F.kategori = b.dataset.c; renderCatGrid(); clearErr('cat'); updateAsetField(); };
 }
 function applySmart(text) {
   const p = parseSmart(text, F.jenisTouched ? F.jenis : null);
@@ -1006,6 +1209,11 @@ function applySmart(text) {
   if (p.nominal) { F.nominal = p.nominal; $('#f-nominal').value = nf.format(p.nominal); clearErr('nominal'); }
   if (p.kategori) { F.kategori = p.kategori; renderCatGrid(); clearErr('cat'); }
   if (p.tanggal) { F.tanggal = p.tanggal; $('#f-tanggal').value = p.tanggal; }
+  if (p.gram) {
+    const emas = S.assets.find(a => a.aktif && a.jenis === 'Emas');
+    if (emas) F.aset = { asetId: emas.id, gram: p.gram };
+  }
+  updateAsetField();
   F.keterangan = p.keterangan; $('#f-ket').value = p.keterangan;
   prev.innerHTML = [
     `<span class="tag ${p.jenis === 'pemasukan' ? 'inc' : 'exp'}" style="background:${p.jenis === 'pemasukan' ? 'var(--income-bg)' : 'var(--expense-bg)'}">${p.jenis === 'pemasukan' ? 'Pemasukan' : 'Pengeluaran'}</span>`,
@@ -1028,7 +1236,9 @@ function submitTx() {
     if (navigator.vibrate) navigator.vibrate(60);
     return;
   }
-  const tx = { id: F.id, jenis: F.jenis, tanggal: F.tanggal, kategori: F.kategori, keterangan: (F.keterangan || '').trim(), nominal: F.nominal };
+  const asetOn = !$('#f-aset-field').hidden && F.aset && F.aset.asetId;
+  const tx = { id: F.id, jenis: F.jenis, tanggal: F.tanggal, kategori: F.kategori, keterangan: (F.keterangan || '').trim(), nominal: F.nominal,
+    aset: asetOn ? { asetId: F.aset.asetId, gram: F.aset.gram || 0 } : null };
   const isEdit = F.mode === 'edit';
   F = null;
   closeSheet();
@@ -1092,6 +1302,104 @@ async function updateSettings(patch) {
     catch (e) { toast('Disimpan di HP · akan dikirim ke server saat online', 'warn', 3200); }
   }
   saveSettingsLocal(); refreshView();
+}
+
+function openPlan(key = planKey()) {
+  const r = cycleRange(parseYmd(key));
+  const cur = planOf(key);
+  const locked = catsLocked('pengeluaran');
+  const cats = Array.from(new Set([...Object.keys(cur), ...categoriesFor('pengeluaran')]));
+  const prevKey = ymd(cycleRange(addDays(r.from, -1)).from), nextKey = ymd(addDays(r.to, 1));
+  const isCur = key === planKey();
+  let samakan = false, dirty = false;
+  const rowHtml = c => {
+    const b = cur[c] || { jatah: 0, mingguan: false };
+    return `<div class="cbe-row" data-cat="${esc(c)}">
+      <div class="cbe-head"><span class="cat-ava" style="background:${catColor(c)}1A">${catEmoji(c)}</span><b>${esc(c)}</b></div>
+      <div class="cbe-amt"><span>Rp</span><input inputmode="numeric" placeholder="0" value="${b.jatah ? nf.format(b.jatah) : ''}" aria-label="Jatah ${esc(c)}"></div>
+      <label class="cbe-week"><input type="checkbox" ${b.mingguan ? 'checked' : ''}> Pantau per minggu <span class="num" data-w></span></label>
+    </div>`;
+  };
+  openSheet(`
+    <div class="sheet-head"><h3>Rencana bulanan</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
+    <div class="sheet-body">
+      <div class="pl-nav"><button class="icon-btn" id="pl-prev" aria-label="Bulan sebelumnya">${ico('back')}</button>
+        <div><b>${esc(r.label)}</b><span>${isCur ? 'Bulan berjalan' : key > planKey() ? 'Rencana ke depan' : 'Bulan lalu'}</span></div>
+        <button class="icon-btn" id="pl-next" aria-label="Bulan berikutnya">${ico('chev')}</button></div>
+      <div class="cbe-sum" id="cbe-sum" style="margin-top:12px"></div>
+      <p class="hint" style="margin:10px 0 4px">Isi jatah tiap pos untuk ${esc(r.label)}; kosongkan pos yang tidak dipakai. Centang "Pantau per minggu" hanya untuk pos harian seperti makan atau transport (jatah × 7 ÷ ${diffDays(r.from, r.to) + 1} hari).</p>
+      <div id="cbe-list">${cats.map(rowHtml).join('')}</div>
+      ${locked ? '' : `<div class="field"><label for="cbe-new">Tambah pos / kategori</label><div class="date-row"><input class="input" id="cbe-new" maxlength="40" placeholder="Contoh: Zakat, Asuransi, Menabung"><button class="btn primary sm" id="cbe-add" aria-label="Tambah">${ico('plus', 'sm')}</button></div><div class="err-msg" id="cbe-err" hidden></div></div>`}
+    </div>
+    <div class="sheet-foot"><button class="btn primary" id="cbe-save">${ico('check')} Simpan rencana ${esc(r.label)}</button></div>`, sh => {
+    const list = $('#cbe-list', sh);
+    const collect = () => $$('.cbe-row', list).map(x => ({ kat: x.dataset.cat, jatah: moneyVal($('input[inputmode]', x)), mingguan: $('input[type=checkbox]', x).checked }));
+    const update = () => {
+      const rows = collect();
+      $$('.cbe-row', list).forEach((x, i) => {
+        const v = rows[i];
+        $('[data-w]', x).textContent = v.jatah && v.mingguan ? `≈ ${rp(weeklyShare(v.jatah, r))}/minggu` : '';
+        x.classList.toggle('on', v.jatah > 0);
+      });
+      const total = rows.reduce((a, v) => a + v.jatah, 0);
+      const ref = planIncomeRef(r);
+      const base = samakan ? total : ref.v;
+      const diff = base - total;
+      $('#cbe-sum').innerHTML = `<div class="cbe-sum-row"><span>Total rencana (${rows.filter(v => v.jatah > 0).length} pos)</span><b class="num">${rp(total)}</b></div>
+        <div class="cbe-sum-row"><span>Acuan: ${samakan ? 'budget bulanan (baru)' : ref.lbl}</span><b class="num">${rp(base)}</b></div>
+        <div class="cbe-sum-row ${diff < 0 ? 'exp' : ''}"><span>${diff >= 0 ? 'Belum dialokasikan' : 'Rencana melebihi acuan'}</span><b class="num">${rp(Math.abs(diff))}</b></div>
+        ${isCur && total > 0 && total !== S.settings.budgetBulanan && !samakan ? `<button class="btn ghost sm" id="cbe-match" style="margin-top:10px;width:100%">Jadikan budget bulanan = ${rp(total)}</button>` : ''}`;
+      const m = $('#cbe-match'); if (m) m.onclick = () => { samakan = true; update(); };
+    };
+    const bindRow = x => {
+      const inp = $('input[inputmode]', x);
+      bindMoney(inp);
+      inp.addEventListener('input', () => { dirty = true; update(); });
+      $('input[type=checkbox]', x).addEventListener('change', () => { dirty = true; update(); });
+    };
+    $$('.cbe-row', list).forEach(bindRow);
+    update();
+    const nav = async k => {
+      if (dirty && !await confirmDialog({ title: 'Buang perubahan?', msg: `Perubahan rencana ${esc(r.label)} belum disimpan.`, ok: 'Buang', danger: true })) return;
+      openPlan(k);
+    };
+    $('#pl-prev', sh).onclick = () => nav(prevKey);
+    $('#pl-next', sh).onclick = () => nav(nextKey);
+    const addBtn = $('#cbe-add', sh);
+    if (addBtn) {
+      const add = () => {
+        const v = $('#cbe-new').value.trim().replace(/\s+/g, ' ');
+        const err = $('#cbe-err');
+        if (!v) { err.textContent = 'Nama pos tidak boleh kosong.'; err.hidden = false; return; }
+        if (collect().some(x => x.kat.toLowerCase() === v.toLowerCase())) { err.textContent = 'Pos/kategori sudah ada.'; err.hidden = false; return; }
+        err.hidden = true;
+        list.insertAdjacentHTML('beforeend', rowHtml(v));
+        const x = list.lastElementChild; bindRow(x); dirty = true; update();
+        $('#cbe-new').value = '';
+        $('input[inputmode]', x).focus();
+      };
+      addBtn.onclick = add;
+      $('#cbe-new').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+    }
+    $('#cbe-save', sh).onclick = async () => {
+      const rows = collect();
+      const items = {};
+      rows.forEach(v => { if (v.jatah > 0) items[v.kat] = { jatah: v.jatah, mingguan: v.mingguan, lunas: !!(cur[v.kat] && cur[v.kat].lunas) }; });
+      const known = categoriesFor('pengeluaran');
+      const added = rows.map(v => v.kat).filter(k => !known.includes(k) && !(k in cur));
+      const patch = {};
+      if (added.length && !locked) {
+        const all = S.settings.kategori.pengeluaran;
+        patch.kategori = { pengeluaran: all.filter(c => !/^lainnya$/i.test(c)).concat(added, all.filter(c => /^lainnya$/i.test(c))) };
+      }
+      if (samakan) patch.budgetBulanan = rows.reduce((a, v) => a + v.jatah, 0);
+      if (Object.keys(patch).length) await updateSettings(patch);
+      await savePlan(key, items);
+      dirty = false;
+      closeSheet();
+      toast(`Rencana ${r.label} disimpan (${Object.keys(items).length} pos)`, 'ok');
+    };
+  });
 }
 
 function openCats(jenis = 'pengeluaran') {
@@ -1343,6 +1651,435 @@ function afterOnboarding() {
   showPin('create', () => startApp(), { skippable: true });
 }
 
+/* ---------------- Aset & posisi keuangan ----------------
+   Kas utama  : saldo awal + semua pemasukan − pengeluaran sejak tanggal mulai (otomatis dari transaksi).
+   Simpanan   : saldo awal + setoran/penarikan (tertaut transaksi) + penyesuaian manual.
+   Emas       : (gram awal + gram mutasi) × harga per gram terakhir.
+   Menabung dicatat sebagai pengeluaran (keluar dari kas) dan sekaligus menambah aset tujuan. */
+const KAS = 'Kas utama';
+const ASET_JENIS = ['Bank', 'E-wallet', 'Tunai', 'Emas', 'Deposito', 'Lainnya'];
+const ASET_EMOJI = { 'Kas utama': '👛', Bank: '🏦', 'E-wallet': '📱', Tunai: '💵', Emas: '🪙', Deposito: '📜', Lainnya: '📦' };
+const assetEmoji = a => ASET_EMOJI[a.jenis] || '📦';
+const activeAssets = () => S.assets.filter(a => a.aktif);
+const normAsset = p => ({ id: String(p.id), nama: String(p.nama || '').trim(), jenis: p.jenis === KAS || ASET_JENIS.includes(p.jenis) ? p.jenis : 'Lainnya',
+  saldoAwal: Math.round(Number(p.saldoAwal) || 0), gramAwal: Math.max(0, Number(p.gramAwal) || 0), mulai: String(p.mulai || ymd(today())),
+  harga: Math.max(0, Math.round(Number(p.harga) || 0)), aktif: p.aktif !== false });
+const normMutasi = p => ({ id: String(p.id), tanggal: String(p.tanggal), asetId: String(p.asetId), jenis: String(p.jenis || 'Penyesuaian'),
+  nominal: Math.round(Number(p.nominal) || 0), gram: Number(p.gram) || 0, catatan: String(p.catatan || ''), ref: String(p.ref || '') });
+
+function assetGram(a, upTo = ymd(today())) {
+  return a.gramAwal + S.mutasi.reduce((s, m) => s + (m.asetId === a.id && m.tanggal >= a.mulai && m.tanggal <= upTo ? (m.gram || 0) : 0), 0);
+}
+function assetValue(a, upTo = ymd(today())) {
+  if (upTo < a.mulai) return 0;
+  const sumN = S.mutasi.reduce((s, m) => s + (m.asetId === a.id && m.tanggal >= a.mulai && m.tanggal <= upTo ? (m.nominal || 0) : 0), 0);
+  if (a.jenis === KAS) {
+    const flow = S.tx.reduce((s, t) => s + (t.tanggal >= a.mulai && t.tanggal <= upTo ? (t.jenis === 'pemasukan' ? t.nominal : -t.nominal) : 0), 0);
+    return a.saldoAwal + flow + sumN;
+  }
+  if (a.jenis === 'Emas' && a.harga > 0) return Math.round(assetGram(a, upTo) * a.harga);
+  return a.saldoAwal + sumN;
+}
+const totalAssets = (upTo = ymd(today())) => activeAssets().reduce((s, a) => s + assetValue(a, upTo), 0);
+
+/** Mutasi lokal yang tertaut ke transaksi (cermin dari yang dibuat server). */
+function linkTxMutasi(tx) {
+  S.mutasi = S.mutasi.filter(m => m.ref !== tx.id);
+  if (!tx.aset || !tx.aset.asetId) return;
+  const sign = tx.jenis === 'pengeluaran' ? 1 : -1;
+  S.mutasi.push(normMutasi({ id: 'tx-' + tx.id, tanggal: tx.tanggal, asetId: tx.aset.asetId, jenis: sign > 0 ? 'Setor' : 'Tarik',
+    nominal: sign * tx.nominal, gram: sign * (Number(tx.aset.gram) || 0), catatan: tx.keterangan || tx.kategori, ref: tx.id }));
+}
+function applyAssetOpLocal(op) {
+  const p = op.payload || {};
+  switch (op.type) {
+    case 'saveAsset': { const a = normAsset(p); const i = S.assets.findIndex(x => x.id === a.id); if (i >= 0) S.assets[i] = a; else S.assets.push(a); break; }
+    case 'deleteAsset': { const a = S.assets.find(x => x.id === p.id); if (a) a.aktif = false; break; }
+    case 'addMutasi': S.mutasi = S.mutasi.filter(m => m.id !== p.id).concat(normMutasi(p)); break;
+    case 'deleteMutasi': S.mutasi = S.mutasi.filter(m => m.id !== p.id); break;
+    case 'add': case 'update': if (op.tx && 'aset' in op.tx) linkTxMutasi(op.tx); break;
+    case 'delete': linkTxMutasi({ id: op.id, aset: null }); break;
+    default: break;
+  }
+}
+async function assetOp(type, payload) {
+  const op = { type, key: (/Asset$/.test(type) ? 'A:' : 'M:') + payload.id, payload };
+  applyAssetOpLocal(op); saveAssetsLocal(); refreshView();
+  if (S.cfg.mode !== 'sheets') return { ok: true };
+  enqueue(op);
+  return processQueue();
+}
+async function ensureCategory(jenis, re, name) {
+  const list = categoriesFor(jenis);
+  const hit = list.find(c => re.test(c));
+  if (hit || catsLocked(jenis)) return hit || null;
+  const all = S.settings.kategori[jenis];
+  await updateSettings({ kategori: { [jenis]: all.filter(c => !/^lainnya$/i.test(c)).concat(name, all.filter(c => /^lainnya$/i.test(c))) } });
+  return name;
+}
+
+function cycleStats(r) {
+  const list = S.tx.filter(t => inRange(t, r));
+  const linked = new Set(S.mutasi.filter(m => m.ref).map(m => m.ref));
+  let masuk = 0, keluar = 0, ditabung = 0, diambil = 0, tabungLink = 0, ambilLink = 0;
+  list.forEach(t => {
+    const isLink = linked.has(t.id);
+    if (t.jenis === 'pemasukan') {
+      masuk += t.nominal;
+      if (isLink || WITHDRAW_RE.test(t.kategori)) diambil += t.nominal;
+      if (isLink) ambilLink += t.nominal;
+    } else {
+      keluar += t.nominal;
+      if (isLink || SAVING_RE.test(t.kategori)) ditabung += t.nominal;
+      if (isLink) tabungLink += t.nominal;
+    }
+  });
+  return { masuk, keluar, ditabung, diambil, konsumsi: keluar - ditabung, net: masuk - keluar + tabungLink - ambilLink, n: list.length };
+}
+
+function evalFinance() {
+  const now = ymd(today()), cur = cycleRange();
+  const before = ymd(addDays(cur.from, -1));
+  const total = totalAssets(now);
+  const started = activeAssets().some(a => a.mulai <= before);
+  const startVal = started ? totalAssets(before) : null;
+  const liquidJenis = ['Bank', 'E-wallet', 'Tunai', 'Deposito'];
+  const liquid = activeAssets().filter(a => liquidJenis.includes(a.jenis)).reduce((s, a) => s + assetValue(a, now), 0);
+  const kons = [];
+  let r = cycleRange(addDays(cur.from, -1));
+  for (let i = 0; i < 3; i++) { const st = cycleStats(r); if (st.n) kons.push(st.konsumsi); r = cycleRange(addDays(r.from, -1)); }
+  let avgKons = kons.length ? kons.reduce((a, b) => a + b, 0) / kons.length : 0;
+  let basis = `rata-rata pengeluaran ${kons.length} bulan terakhir, di luar tabungan`;
+  if (!avgKons) {
+    const pl = planAll().filter(c => !SAVING_RE.test(c.kat)).reduce((s, c) => s + c.jatah, 0);
+    if (pl) { avgKons = pl; basis = 'rencana bulan ini, di luar pos tabungan'; }
+    else if (S.settings.budgetBulanan) { avgKons = S.settings.budgetBulanan; basis = 'budget bulanan'; }
+  }
+  const cs = cycleStats(cur);
+  const target = planAll().filter(c => SAVING_RE.test(c.kat)).reduce((s, c) => s + c.jatah, 0);
+  return { total, started, startVal, delta: started ? total - startVal : null, liquid, avgKons, basis,
+    months: avgKons ? liquid / avgKons : null, cs, rate: cs.masuk - cs.diambil > 0 ? cs.ditabung / (cs.masuk - cs.diambil) : null, target };
+}
+
+function assetMiniCard() {
+  if (!activeAssets().length) {
+    return `<button class="card asset-mini" data-action="go-assets"><span class="am-ic">💰</span><span class="am-tx"><b>Catat posisi keuanganmu</b><span>Tabungan, emas, dan saldo awal mulai 1 Des 2026</span></span>${ico('chev', 'sm')}</button>`;
+  }
+  const e = evalFinance();
+  return `<button class="card asset-mini" data-action="go-assets"><span class="am-ic">💰</span><span class="am-tx"><span>Total aset</span><b class="num">${rp(e.total)}</b>
+    ${e.delta != null ? `<span class="num ${e.delta >= 0 ? 'inc' : 'exp'}">${e.delta >= 0 ? '+' : '−'}${rp(Math.abs(e.delta))} bulan ini</span>` : ''}</span>${ico('chev', 'sm')}</button>`;
+}
+
+function renderAssets() {
+  const act = activeAssets();
+  const head = `<div class="topbar"><div><h1>Aset</h1><div class="sub">Posisi per ${fmtDate(ymd(today()))}</div></div>
+    <div style="display:flex;gap:8px"><button class="icon-btn ${S.pulling ? 'spin' : ''}" data-action="sync" aria-label="Sinkronkan">${ico('refresh')}</button><button class="icon-btn" data-nav-go="settings" aria-label="Pengaturan">${ico('settings')}</button></div></div>`;
+  if (!act.length) {
+    return head + `<div class="card" style="text-align:center;padding:24px 18px">
+      <div class="empty"><div class="art">💰</div><h3>Catat posisi keuanganmu</h3>
+      <p>Isi saldo awal: uang harian (kas utama), tabungan, e-wallet, dan emas. Setelah itu setiap kali menabung atau memakai tabungan, total asetmu ikut ter-update dan bisa dipantau 12 bulan ke depan.</p>
+      <button class="btn primary" data-action="open-asset-setup">${ico('plus')} Isi posisi awal</button></div></div>`;
+  }
+  const now = ymd(today());
+  const e = evalFinance();
+  const byJenis = {};
+  act.forEach(a => { byJenis[a.jenis] = (byJenis[a.jenis] || 0) + Math.max(0, assetValue(a, now)); });
+  const posTotal = Object.values(byJenis).reduce((a, b) => a + b, 0) || 1;
+  const JCOL = { 'Kas utama': '#6A5CFF', Bank: '#3E7BFA', 'E-wallet': '#14C8B8', Tunai: '#10B981', Emas: '#F59E0B', Deposito: '#EC4899', Lainnya: '#94A3B8' };
+  const comp = Object.keys(byJenis).filter(k => byJenis[k] > 0).sort((a, b) => byJenis[b] - byJenis[a]);
+  const future = act.some(a => a.mulai > now);
+  const cards = act.slice().sort((a, b) => (a.jenis === KAS ? -1 : b.jenis === KAS ? 1 : assetValue(b, now) - assetValue(a, now))).map(a => {
+    const v = assetValue(a, now);
+    const sub = a.mulai > now ? `Mulai dicatat ${fmtDate(a.mulai)} · saldo awal ${a.jenis === 'Emas' && a.harga ? `${fmtGram(a.gramAwal)} gram` : rp(a.saldoAwal)}`
+      : a.jenis === KAS ? `Otomatis dari transaksi sejak ${fmtDate(a.mulai)}`
+      : a.jenis === 'Emas' ? `${fmtGram(assetGram(a, now))} gram × ${a.harga ? rp(a.harga) : 'harga belum diisi'}`
+      : a.jenis;
+    return `<div class="asset-card">
+      <div class="ac-top"><span class="cat-ava" style="background:${JCOL[a.jenis] || '#94A3B8'}1F">${assetEmoji(a)}</span>
+        <div class="ac-name"><b>${esc(a.nama)}</b><span>${esc(sub)}</span></div>
+        <b class="num ac-val">${a.mulai > now ? rp(a.jenis === 'Emas' && a.harga ? Math.round(a.gramAwal * a.harga) : a.saldoAwal) : rp(v)}</b></div>
+      <div class="ac-acts">
+        ${a.jenis === KAS ? '' : `<button class="chip" data-action="asset-setor" data-id="${esc(a.id)}">${ico('down', 'xs')} Setor</button><button class="chip" data-action="asset-tarik" data-id="${esc(a.id)}">${ico('up', 'xs')} Pakai</button>`}
+        <button class="chip" data-action="asset-update" data-id="${esc(a.id)}">${ico('refresh', 'xs')} ${a.jenis === 'Emas' ? 'Harga' : 'Sesuaikan'}</button>
+        <button class="chip" data-action="asset-edit" data-id="${esc(a.id)}" aria-label="Ubah ${esc(a.nama)}">${ico('settings', 'xs')}</button>
+      </div></div>`;
+  }).join('');
+  const mut = S.mutasi.filter(m => act.some(a => a.id === m.asetId)).sort((a, b) => b.tanggal.localeCompare(a.tanggal)).slice(0, 8);
+  const mutHtml = mut.map(m => {
+    const a = S.assets.find(x => x.id === m.asetId);
+    return `<button class="tx" data-action="mutasi-open" data-id="${esc(m.id)}"><span class="cat-ava" style="background:#EEF1FA">${a ? assetEmoji(a) : '📦'}</span>
+      <span class="mid"><span class="t" style="display:block">${esc(m.jenis)} · ${esc(a ? a.nama : '?')}</span><span class="d">${esc(m.catatan || '')}${m.catatan ? ' · ' : ''}${dayLabel(m.tanggal)}${m.gram ? ` · ${m.gram > 0 ? '+' : '−'}${fmtGram(Math.abs(m.gram))} g` : ''}</span></span>
+      <span class="amt num ${m.nominal >= 0 ? 'inc' : 'exp'}">${m.nominal ? (m.nominal >= 0 ? '+' : '−') + rp(Math.abs(m.nominal)) : ''}</span></button>`;
+  }).join('');
+
+  return head + `
+  <section class="hero" aria-label="Total aset">
+    <div class="label">Total aset ${future ? '(posisi awal)' : 'hari ini'}</div>
+    <div class="big num">${rp(future && !e.total ? act.reduce((s, a) => s + (a.jenis === 'Emas' && a.harga ? Math.round(a.gramAwal * a.harga) : a.saldoAwal), 0) : e.total)}</div>
+    ${e.delta != null ? `<div class="hero-box" style="display:inline-block"><div class="k">Perubahan ${esc(cycleRange().label)}</div><div class="v num">${e.delta >= 0 ? '+' : '−'}${rp(Math.abs(e.delta))}${e.startVal ? ` (${e.delta >= 0 ? '+' : '−'}${Math.abs(Math.round(e.delta / e.startVal * 1000) / 10).toString().replace('.', ',')}%)` : ''}</div></div>`
+      : `<div class="hero-box" style="display:inline-block"><div class="k">Pencatatan</div><div class="v">${future ? `Mulai ${fmtDate(act.map(a => a.mulai).sort()[0])}` : 'Bulan pertama'}</div></div>`}
+    <div class="comp-bar">${comp.map(k => `<i style="width:${byJenis[k] / posTotal * 100}%;background:${JCOL[k]}"></i>`).join('')}</div>
+    <div class="comp-legend">${comp.map(k => `<span><i style="background:${JCOL[k]}"></i>${esc(k)} ${Math.round(byJenis[k] / posTotal * 100)}%</span>`).join('')}</div>
+  </section>
+
+  <div class="section-title"><h2>Evaluasi</h2></div>
+  ${evalCard(e)}
+
+  <div class="section-title"><h2>Daftar aset</h2><button class="link-btn" data-action="asset-add">+ Tambah</button></div>
+  <div class="card" style="padding:4px 14px">${cards}</div>
+
+  <div class="section-title"><h2>12 bulan ke depan</h2></div>
+  <div class="card chart">${yearView()}</div>
+
+  <div class="section-title"><h2>Mutasi aset terbaru</h2></div>
+  <div class="card" style="padding:4px 12px">${mutHtml || '<div class="empty" style="padding:18px"><p>Belum ada setoran atau penarikan. Gunakan tombol Setor/Pakai, atau catat transaksi kategori Menabung lalu pilih asetnya.</p></div>'}</div>`;
+}
+const fmtGram = g => (Math.round(g * 1000) / 1000).toString().replace('.', ',');
+
+function evalCard(e) {
+  const rows = [];
+  if (e.months != null) {
+    const m = e.months, st = m >= 6 ? 'safe' : m >= 3 ? 'warn-ok' : 'over';
+    const need3 = Math.max(0, e.avgKons * 3 - e.liquid);
+    rows.push(`<div class="ev-row"><div class="ev-head"><b>Dana darurat</b><span class="badge ${m >= 6 ? 'safe' : m >= 3 ? 'warn' : 'over'}">${(Math.round(m * 10) / 10).toString().replace('.', ',')} bulan</span></div>
+      <div class="bar thin" style="margin-top:8px"><div class="fill ${st === 'over' ? 'over' : st === 'warn-ok' ? 'warn' : 'done'}" style="width:${Math.min(100, m / 6 * 100)}%"></div><span class="pace" style="left:50%"></span></div>
+      <div class="budget-msg">${m >= 6 ? 'Aman: simpanan likuid sudah menutup lebih dari 6 bulan pengeluaran. Kelebihannya bisa diarahkan ke tujuan jangka panjang.'
+        : m >= 3 ? `Cukup (3–6 bulan). Tambah ${rp(e.avgKons * 6 - e.liquid)} untuk mencapai 6 bulan.`
+        : `Belum aman. Kurang ${rp(need3)} untuk minimal 3 bulan pengeluaran.`}</div>
+      <div class="hint">Simpanan likuid (bank, e-wallet, tunai, deposito) ${rp(e.liquid)} ÷ ${rp(e.avgKons)}/bulan (${esc(e.basis)}). Kas utama dan emas tidak dihitung.</div></div>`);
+  }
+  if (e.cs.masuk || e.target) {
+    const pct = e.target ? e.cs.ditabung / e.target : 0;
+    rows.push(`<div class="ev-row"><div class="ev-head"><b>Menabung ${esc(cycleRange().label)}</b><span class="badge ${e.target ? (pct >= 1 ? 'safe' : 'none') : 'none'}">${e.rate != null ? Math.round(e.rate * 100) + '% pemasukan' : '—'}</span></div>
+      ${e.target ? `<div class="bar thin" style="margin-top:8px"><div class="fill ${pct >= 1 ? 'done' : ''}" style="width:${Math.min(100, pct * 100)}%"></div></div>` : ''}
+      <div class="budget-msg">Sudah menabung ${rp(e.cs.ditabung)}${e.target ? ` dari rencana ${rp(e.target)}${pct >= 1 ? '. Target tercapai.' : ` · kurang ${rp(e.target - e.cs.ditabung)}`}` : ''}${e.cs.diambil ? ` · memakai tabungan ${rp(e.cs.diambil)}` : ''}.</div></div>`);
+  }
+  if (e.delta != null) {
+    rows.push(`<div class="ev-row"><div class="ev-head"><b>Pertumbuhan aset bulan ini</b><span class="badge ${e.delta >= 0 ? 'safe' : 'over'}">${e.delta >= 0 ? 'Naik' : 'Turun'}</span></div>
+      <div class="budget-msg">Dari ${rp(e.startVal)} menjadi ${rp(e.total)} (${e.delta >= 0 ? '+' : '−'}${rp(Math.abs(e.delta))}). ${e.delta < 0 ? 'Pengeluaran bulan ini lebih besar dari pemasukan.' : ''}</div></div>`);
+  }
+  return `<div class="card ev-card">${rows.join('') || '<p class="budget-msg" style="margin:0">Evaluasi muncul setelah ada transaksi atau rencana bulan ini.</p>'}</div>`;
+}
+
+function yearView() {
+  const act = activeAssets();
+  const startYmd = act.map(a => a.mulai).sort()[0];
+  let r = cycleRange(parseYmd(startYmd));
+  const nowS = ymd(today());
+  const months = [];
+  for (let i = 0; i < 12; i++) { months.push(r); r = cycleRange(addDays(r.to, 1)); }
+  const rows = months.map(m => {
+    const started = m.fromS <= nowS;
+    const cs = started ? cycleStats(m) : null;
+    const endS = m.toS < nowS ? m.toS : nowS;
+    return { m, started, done: m.toS < nowS, cs, total: started ? totalAssets(endS) : null };
+  });
+  const done = rows.filter(x => x.done && x.cs.n);
+  const avgNet = done.length ? done.reduce((s, x) => s + x.cs.net, 0) / done.length : null;
+  const base = totalAssets(nowS > startYmd ? nowS : startYmd) || act.reduce((s, a) => s + assetValue(a, a.mulai), 0);
+  let k = 0;
+  rows.forEach(x => { if (!x.started) { k++; x.proj = avgNet != null ? Math.round(base + avgNet * k) : null; } });
+  const lbl = m => (S.settings.awalSiklus === 1 ? BLN[m.from.getMonth()] + (m.from.getMonth() === 0 || m === months[0] ? ' ' + String(m.from.getFullYear()).slice(2) : '') : fmtDateShort(m.from));
+  const anyActual = rows.some(x => x.started);
+  const chart = (anyActual || avgNet != null)
+    ? barChart({ id: 'Total aset 12 bulan', labels: rows.map(x => lbl(x.m)), series: [{ values: rows.map(x => x.total != null ? x.total : (x.proj || 0)), color: (v, i) => (rows[i].started ? '#6A5CFF' : '#C9C4FF') }] })
+      + `<div class="legend-inline"><span><i style="background:#6A5CFF"></i>Aktual</span><span><i style="background:#C9C4FF"></i>Perkiraan</span></div>`
+    : `<p class="budget-msg" style="margin:4px 0 8px">Pencatatan mulai ${fmtDate(startYmd)}. Posisi awal: <b class="num">${rp(base)}</b>. Grafik total aset terisi otomatis tiap bulan; perkiraan muncul setelah 1 bulan penuh.</p>`;
+  const table = `<table class="rekap-table"><thead><tr><th>Bulan</th><th>Masuk</th><th>Keluar</th><th>Ditabung</th><th>Total aset</th></tr></thead><tbody>
+    ${rows.map(x => `<tr class="${x.started ? '' : 'muted'}"><td>${esc(x.m.label.replace(/ \d{4}$/, ''))}</td>
+      <td class="num inc">${x.cs ? rpShort(x.cs.masuk) : '–'}</td><td class="num exp">${x.cs ? rpShort(x.cs.keluar) : '–'}</td><td class="num">${x.cs ? rpShort(x.cs.ditabung) : '–'}</td>
+      <td class="num">${x.total != null ? rpShort(x.total) : x.proj != null ? '≈' + rpShort(x.proj) : '–'}</td></tr>`).join('')}
+    </tbody></table>
+    <div class="hint" style="margin-top:8px">${avgNet != null ? `Perkiraan memakai rata-rata perubahan aset per bulan (${avgNet >= 0 ? '+' : '−'}${rp(Math.abs(avgNet))}). ` : ''}Emas dinilai dengan harga per gram terakhir.</div>`;
+  return chart + table;
+}
+
+function openAssetSetup() {
+  const defStart = ymd(today()) < '2026-12-01' ? '2026-12-01' : ymd(today());
+  const rowHtml = (nama, jenis) => `<div class="as-row">
+      <div class="date-row"><input class="input as-nama" placeholder="Nama, mis. Tabungan BSI" value="${esc(nama)}" maxlength="40">
+        <select class="input as-jenis" style="max-width:130px">${ASET_JENIS.map(j => `<option ${j === jenis ? 'selected' : ''}>${j}</option>`).join('')}</select>
+        <button type="button" class="icon-btn as-del" aria-label="Hapus baris">${ico('x', 'sm')}</button></div>
+      <div class="as-val"></div></div>`;
+  const valHtml = jenis => jenis === 'Emas'
+    ? `<div class="date-row as-lbls"><span>Jumlah gram</span><span>Harga per gram (Rp)</span></div><div class="date-row"><input class="input as-gram" inputmode="decimal" placeholder="mis. 10"><input class="input as-harga" inputmode="numeric" placeholder="mis. 2.500.000"></div>`
+    : `<div class="cbe-amt"><span>Rp</span><input class="as-saldo" inputmode="numeric" placeholder="Saldo"></div>`;
+  openSheet(`
+    <div class="sheet-head"><h3>Posisi awal keuangan</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
+    <div class="sheet-body">
+      <div class="field"><label for="as-mulai">Mulai dicatat per tanggal</label><input class="input" type="date" id="as-mulai" value="${defStart}"></div>
+      <div class="field"><label>Kas utama (uang harian)</label>
+        <div class="cbe-amt"><span>Rp</span><input id="as-kas" inputmode="numeric" placeholder="0"></div>
+        <div class="hint">Total uang yang dipakai sehari-hari: rekening gaji/utama + dompet + e-wallet harian. Setelah ini saldonya otomatis berubah dari setiap pemasukan dan pengeluaran yang dicatat.</div></div>
+      <div class="field"><span class="lbl">Simpanan & aset</span><div id="as-list">${rowHtml('Tabungan', 'Bank')}${rowHtml('Emas', 'Emas')}</div>
+        <button type="button" class="btn ghost sm" id="as-add" style="margin-top:10px">${ico('plus', 'sm')} Tambah aset</button>
+        <div class="hint">Isi nilai per tanggal mulai. Emas dicatat dalam gram dan harga per gram (bisa diperbarui kapan saja).</div></div>
+      <div class="cbe-sum" id="as-sum" style="margin-top:14px"></div>
+      <div class="err-msg" id="as-err" hidden></div>
+    </div>
+    <div class="sheet-foot"><button class="btn primary" id="as-save">${ico('check')} Simpan posisi awal</button></div>`, sh => {
+    const list = $('#as-list', sh);
+    const bindRow = row => {
+      const sel = $('.as-jenis', row);
+      const paint = () => {
+        $('.as-val', row).innerHTML = valHtml(sel.value);
+        $$('.as-saldo, .as-harga', row).forEach(bindMoney);
+        $$('input', $('.as-val', row)).forEach(i => i.addEventListener('input', sum));
+        sum();
+      };
+      sel.addEventListener('change', paint);
+      $('.as-del', row).onclick = () => { row.remove(); sum(); };
+      paint();
+    };
+    const fieldVal = (row, sel) => { const el = $(sel, row); return el ? el.value : ''; };
+    const read = () => $$('.as-row', list).map(row => {
+      const jenis = $('.as-jenis', row).value, nama = $('.as-nama', row).value.trim();
+      if (jenis === 'Emas') {
+        const gram = Number(String(fieldVal(row, '.as-gram')).replace(',', '.')) || 0, harga = Number(fieldVal(row, '.as-harga').replace(/\D/g, '')) || 0;
+        return { nama, jenis, gramAwal: gram, harga, saldoAwal: 0, nilai: Math.round(gram * harga) };
+      }
+      const saldo = Number(fieldVal(row, '.as-saldo').replace(/\D/g, '')) || 0;
+      return { nama, jenis, saldoAwal: saldo, gramAwal: 0, harga: 0, nilai: saldo };
+    });
+    const sum = () => {
+      const kas = moneyVal($('#as-kas')), rows = read();
+      const tot = kas + rows.reduce((s, x) => s + x.nilai, 0);
+      $('#as-sum').innerHTML = `<div class="cbe-sum-row"><span>Kas utama</span><b class="num">${rp(kas)}</b></div>
+        ${rows.filter(x => x.nilai).map(x => `<div class="cbe-sum-row"><span>${esc(x.nama || x.jenis)}</span><b class="num">${rp(x.nilai)}</b></div>`).join('')}
+        <div class="cbe-sum-row" style="border-top:1px solid #DCD8FF;margin-top:4px;padding-top:6px"><span><b>Total posisi awal</b></span><b class="num">${rp(tot)}</b></div>`;
+    };
+    bindMoney($('#as-kas')); $('#as-kas').addEventListener('input', sum);
+    $$('.as-row', list).forEach(bindRow);
+    $('#as-add', sh).onclick = () => { list.insertAdjacentHTML('beforeend', rowHtml('', 'Bank')); bindRow(list.lastElementChild); $('.as-nama', list.lastElementChild).focus(); };
+    $('#as-save', sh).onclick = async () => {
+      const mulai = $('#as-mulai').value, err = $('#as-err');
+      const rows = read().filter(x => x.nilai || x.gramAwal || x.nama && x.saldoAwal);
+      if (!mulai) { err.textContent = 'Tanggal mulai wajib diisi.'; err.hidden = false; return; }
+      if (rows.some(x => !x.nama)) { err.textContent = 'Setiap aset yang diisi nilainya harus punya nama.'; err.hidden = false; return; }
+      if (rows.some(x => x.jenis === 'Emas' && x.gramAwal && !x.harga)) { err.textContent = 'Isi harga per gram untuk emas (boleh perkiraan, bisa diperbarui nanti).'; err.hidden = false; return; }
+      err.hidden = true;
+      const ops = [];
+      if (!S.assets.some(a => a.aktif && a.jenis === KAS)) ops.push({ id: uuid(), nama: KAS, jenis: KAS, saldoAwal: moneyVal($('#as-kas')), gramAwal: 0, harga: 0, mulai, aktif: true });
+      rows.forEach(x => ops.push({ id: uuid(), nama: x.nama, jenis: x.jenis, saldoAwal: x.saldoAwal, gramAwal: x.gramAwal, harga: x.harga, mulai, aktif: true }));
+      closeSheet();
+      const t = toast('Menyimpan posisi awal…', S.cfg.mode === 'sheets' ? 'load' : 'ok', S.cfg.mode === 'sheets' ? 0 : 2000);
+      ops.forEach(p => { const op = { type: 'saveAsset', key: 'A:' + p.id, payload: p }; applyAssetOpLocal(op); if (S.cfg.mode === 'sheets') enqueue(op); });
+      saveAssetsLocal(); go('assets');
+      await ensureCategory('pengeluaran', SAVING_RE, 'Menabung');
+      await ensureCategory('pemasukan', WITHDRAW_RE, 'Ambil dari Tabungan');
+      if (S.cfg.mode === 'sheets') {
+        const r = await processQueue();
+        if (r.ok) t.update(`Posisi awal tersimpan (${ops.length} aset) di sheet "Aset"`, 'ok', 3000);
+        else t.update(r.offline ? 'Tersimpan di HP · dikirim saat online' : 'Gagal menyimpan: ' + r.msg, r.offline ? 'warn' : 'err', 4000);
+      }
+    };
+  });
+}
+
+function openAssetEdit(a) {
+  const edit = !!a;
+  const hasKas = S.assets.some(x => x.aktif && x.jenis === KAS && (!a || x.id !== a.id));
+  const jenisList = (hasKas ? [] : [KAS]).concat(ASET_JENIS);
+  const v = a || { nama: '', jenis: 'Bank', saldoAwal: 0, gramAwal: 0, harga: 0, mulai: ymd(today()) < '2026-12-01' ? '2026-12-01' : ymd(today()) };
+  openSheet(`
+    <div class="sheet-head"><h3>${edit ? 'Ubah aset' : 'Tambah aset'}</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
+    <div class="sheet-body">
+      <div class="field"><label for="ae-nama">Nama</label><input class="input" id="ae-nama" maxlength="40" value="${esc(v.nama)}" placeholder="Mis. Tabungan BSI, GoPay, Emas Antam"></div>
+      <div class="field"><label for="ae-jenis">Jenis</label><select class="input" id="ae-jenis">${jenisList.map(j => `<option ${j === v.jenis ? 'selected' : ''}>${j}</option>`).join('')}</select></div>
+      <div class="field"><label for="ae-mulai">Mulai dicatat per</label><input class="input" type="date" id="ae-mulai" value="${v.mulai}"></div>
+      <div class="field" id="ae-saldo-f"><label for="ae-saldo">Saldo awal (per tanggal mulai)</label>${moneyInput('ae-saldo', v.saldoAwal)}</div>
+      <div class="field" id="ae-emas-f"><label>Emas awal</label><div class="date-row as-lbls"><span>Jumlah gram</span><span>Harga per gram (Rp)</span></div><div class="date-row"><input class="input" id="ae-gram" inputmode="decimal" value="${v.gramAwal ? fmtGram(v.gramAwal) : ''}" placeholder="Gram"><input class="input" id="ae-harga" inputmode="numeric" value="${v.harga ? nf.format(v.harga) : ''}" placeholder="Harga per gram"></div></div>
+      <div class="err-msg" id="ae-err" hidden></div>
+    </div>
+    <div class="sheet-foot">${edit ? `<button class="btn danger" style="width:auto;flex-shrink:0" id="ae-arsip">Arsipkan</button>` : ''}<button class="btn primary" id="ae-save">${ico('check')} Simpan</button></div>`, sh => {
+    const jenis = $('#ae-jenis', sh);
+    const paint = () => { $('#ae-emas-f').hidden = jenis.value !== 'Emas'; $('#ae-saldo-f').hidden = jenis.value === 'Emas'; };
+    jenis.addEventListener('change', paint); paint();
+    bindMoney($('#ae-saldo')); bindMoney($('#ae-harga'));
+    $('#ae-save', sh).onclick = async () => {
+      const nama = $('#ae-nama').value.trim(), err = $('#ae-err');
+      if (!nama) { err.textContent = 'Nama aset wajib diisi.'; err.hidden = false; return; }
+      const p = { id: edit ? a.id : uuid(), nama, jenis: jenis.value, mulai: $('#ae-mulai').value || ymd(today()), aktif: true,
+        saldoAwal: jenis.value === 'Emas' ? 0 : moneyVal($('#ae-saldo')),
+        gramAwal: jenis.value === 'Emas' ? Number(String($('#ae-gram').value).replace(',', '.')) || 0 : 0,
+        harga: jenis.value === 'Emas' ? moneyVal($('#ae-harga')) : 0 };
+      closeSheet();
+      const r = await assetOp('saveAsset', p);
+      toast(r.ok ? `${nama} disimpan` : r.offline ? 'Tersimpan di HP · dikirim saat online' : 'Gagal: ' + r.msg, r.ok ? 'ok' : r.offline ? 'warn' : 'err');
+      ensureCategory('pengeluaran', SAVING_RE, 'Menabung');
+    };
+    const ar = $('#ae-arsip', sh);
+    if (ar) ar.onclick = async () => {
+      if (!await confirmDialog({ title: `Arsipkan ${esc(a.nama)}?`, msg: 'Aset tidak lagi dihitung di total aset (termasuk riwayat bulan-bulan sebelumnya). Datanya tetap ada di sheet "Aset".', ok: 'Arsipkan', danger: true })) return;
+      closeSheet(); await assetOp('deleteAsset', { id: a.id }); toast(`${a.nama} diarsipkan`, 'ok');
+    };
+  });
+}
+
+function openAssetUpdate(a) {
+  if (!a) return;
+  const now = ymd(today());
+  const emas = a.jenis === 'Emas';
+  const curVal = assetValue(a, now), curGram = assetGram(a, now);
+  openSheet(`
+    <div class="sheet-head"><h3>${emas ? 'Perbarui emas' : 'Sesuaikan saldo'} · ${esc(a.nama)}</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
+    <div class="sheet-body">
+      ${emas ? `<div class="field"><label for="au-harga">Harga per gram hari ini</label>${moneyInput('au-harga', a.harga)}<div class="hint">Total nilai emas langsung dihitung ulang dengan harga ini.</div></div>
+        <div class="field"><label for="au-gram">Jumlah gram sebenarnya</label><input class="input" id="au-gram" inputmode="decimal" value="${fmtGram(curGram)}"><div class="hint">Ubah hanya kalau catatan gram berbeda dengan yang Anda pegang.</div></div>`
+      : `<div class="field"><label for="au-saldo">Saldo sebenarnya hari ini</label>${moneyInput('au-saldo', curVal)}<div class="hint">Tercatat ${rp(curVal)}. Selisihnya dicatat sebagai penyesuaian (mis. bunga/bagi hasil, biaya admin, transaksi yang lupa dicatat).</div></div>
+        <div class="field"><label for="au-cat">Keterangan</label><input class="input" id="au-cat" maxlength="80" value="Penyesuaian saldo"></div>`}
+      <div id="au-diff" class="cbe-sum" style="margin-top:12px"></div>
+    </div>
+    <div class="sheet-foot"><button class="btn primary" id="au-save">${ico('check')} Simpan</button></div>`, sh => {
+    const diffEl = $('#au-diff');
+    const calc = () => {
+      if (emas) {
+        const h = moneyVal($('#au-harga')), g = Number(String($('#au-gram').value).replace(',', '.')) || 0;
+        diffEl.innerHTML = `<div class="cbe-sum-row"><span>Nilai baru</span><b class="num">${rp(Math.round(g * h))}</b></div><div class="cbe-sum-row"><span>Sebelumnya</span><b class="num">${rp(curVal)}</b></div>`;
+      } else {
+        const d = moneyVal($('#au-saldo')) - curVal;
+        diffEl.innerHTML = `<div class="cbe-sum-row ${d < 0 ? 'exp' : ''}"><span>Selisih dicatat</span><b class="num">${d >= 0 ? '+' : '−'}${rp(Math.abs(d))}</b></div>`;
+      }
+    };
+    $$('#au-harga, #au-saldo', sh).forEach(i => { bindMoney(i); i.addEventListener('input', calc); });
+    const g = $('#au-gram', sh); if (g) g.addEventListener('input', calc);
+    calc();
+    $('#au-save', sh).onclick = async () => {
+      closeSheet();
+      let r = { ok: true };
+      if (emas) {
+        const h = moneyVal($('#au-harga')), gNew = Number(String($('#au-gram').value).replace(',', '.')) || 0;
+        if (h !== a.harga) r = await assetOp('saveAsset', Object.assign({}, a, { harga: h }));
+        const dg = Math.round((gNew - curGram) * 1000) / 1000;
+        if (dg) r = await assetOp('addMutasi', { id: uuid(), tanggal: now, asetId: a.id, jenis: 'Penyesuaian', nominal: 0, gram: dg, catatan: 'Koreksi gram' });
+      } else {
+        const d = moneyVal($('#au-saldo')) - curVal;
+        if (!d) return toast('Tidak ada selisih', 'ok', 1500);
+        r = await assetOp('addMutasi', { id: uuid(), tanggal: now, asetId: a.id, jenis: 'Penyesuaian', nominal: d, gram: 0, catatan: $('#au-cat').value.trim() || 'Penyesuaian saldo' });
+      }
+      toast(r.ok ? `${a.nama} diperbarui` : r.offline ? 'Tersimpan di HP · dikirim saat online' : 'Gagal: ' + r.msg, r.ok ? 'ok' : r.offline ? 'warn' : 'err');
+    };
+  });
+}
+
+async function assetQuickTx(id, jenis) {
+  const a = S.assets.find(x => x.id === id);
+  if (!a) return;
+  const kategori = jenis === 'pengeluaran' ? await ensureCategory('pengeluaran', SAVING_RE, 'Menabung') : await ensureCategory('pemasukan', WITHDRAW_RE, 'Ambil dari Tabungan');
+  openTxForm(null, { jenis, kategori, jenisTouched: true, asetForce: true, aset: { asetId: id, gram: 0 },
+    keterangan: jenis === 'pengeluaran' ? `Setor ke ${a.nama}` : `Pakai dari ${a.nama}` });
+}
+
+async function openMutasi(id) {
+  const m = S.mutasi.find(x => x.id === id);
+  if (!m) return;
+  if (m.ref) { const t = S.tx.find(x => x.id === m.ref); if (t) return openTxForm(t); }
+  const a = S.assets.find(x => x.id === m.asetId);
+  if (await confirmDialog({ title: 'Hapus penyesuaian?', msg: `${esc(m.catatan || m.jenis)} ${m.nominal ? rp(m.nominal) : ''}${m.gram ? ` ${fmtGram(m.gram)} gram` : ''} pada ${esc(a ? a.nama : '')} (${fmtDate(m.tanggal)}) akan dihapus.`, ok: 'Hapus', danger: true })) {
+    await assetOp('deleteMutasi', { id }); toast('Penyesuaian dihapus', 'ok');
+  }
+}
+
 /* ---------------- Aksi global ---------------- */
 const ACTIONS = {
   'open-add': () => openTxForm(null),
@@ -1371,6 +2108,16 @@ const ACTIONS = {
   'hist-jenis': el => { S.hist.jenis = el.dataset.k; $$('[data-action="hist-jenis"]').forEach(b => b.classList.toggle('on', b === el)); renderHistList(); },
   'hist-more': () => { S.hist.limit += 100; renderHistList(); },
   'open-budget': () => openBudget(),
+  'open-plan': () => openPlan(),
+  'go-assets': () => go('assets'),
+  'open-asset-setup': () => openAssetSetup(),
+  'asset-add': () => openAssetEdit(null),
+  'asset-edit': el => openAssetEdit(S.assets.find(a => a.id === el.dataset.id)),
+  'asset-update': el => openAssetUpdate(S.assets.find(a => a.id === el.dataset.id)),
+  'asset-setor': el => assetQuickTx(el.dataset.id, 'pengeluaran'),
+  'asset-tarik': el => assetQuickTx(el.dataset.id, 'pemasukan'),
+  'mutasi-open': el => openMutasi(el.dataset.id),
+  'plan-toggle': el => togglePlanLunas(el.dataset.cat),
   'open-cats': () => openCats('pengeluaran'),
   'open-conn': () => openConn(),
   'export-csv': () => exportCsv(),
@@ -1442,6 +2189,6 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 }
 
 // Ekspor untuk pengujian otomatis (tidak dipakai aplikasi)
-window.__KW = { parseSmart, extractAmount, budgetEval, S };
+window.__KW = { parseSmart, extractAmount, budgetEval, S, totalAssets, assetValue, assetGram, planEval, evalFinance };
 
 boot();
