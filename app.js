@@ -4,7 +4,7 @@
    ========================================================= */
 'use strict';
 
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.1.0';
 
 /* ---------------- Penyimpanan lokal ---------------- */
 const LS = {
@@ -66,6 +66,7 @@ function normSettings(s) {
     budgetBulanan: Math.max(0, Number(s.budgetBulanan ?? DEFAULT_SETTINGS.budgetBulanan) || 0),
     budgetMingguan: Math.max(0, Number(s.budgetMingguan ?? DEFAULT_SETTINGS.budgetMingguan) || 0),
     awalSiklus: Math.min(28, Math.max(1, Number(s.awalSiklus) || 1)),
+    danaDarurat: Math.max(0, Number(s.danaDarurat) || 0),
     kategori: {
       pemasukan: Array.isArray(k.pemasukan) && k.pemasukan.length ? k.pemasukan : DEFAULT_SETTINGS.kategori.pemasukan.slice(),
       pengeluaran: Array.isArray(k.pengeluaran) && k.pengeluaran.length ? k.pengeluaran : DEFAULT_SETTINGS.kategori.pengeluaran.slice()
@@ -198,7 +199,7 @@ const SAVING_RE = /tabung|menabung|investasi|dana darurat|emas/i; // pos yang se
 const WITHDRAW_RE = /ambil|tarik|cair|jual emas|dari tabungan/i; // pemasukan yang berasal dari aset sendiri
 const PALETTE = ['#6366F1', '#14B8A6', '#F59E0B', '#EC4899', '#0EA5E9', '#8B5CF6', '#10B981', '#F43F5E', '#64748B', '#84CC16', '#06B6D4', '#A855F7'];
 const CAT_EMOJI = [
-  [/zakat/i, '🕌'],
+  [/zakat/i, '🕌'], [/travel|liburan|wisata|jalan-jalan/i, '✈️'],
   [/makan|minum|kuliner|food|jajan/i, '🍜'], [/transport|bensin|kendaraan/i, '🛵'], [/belanja|shopping/i, '🛍️'],
   [/tagihan|utilitas|listrik/i, '💡'], [/hiburan|rekreasi/i, '🎬'], [/kesehatan|medis/i, '💊'],
   [/pendidikan|edukasi|sekolah/i, '📚'], [/sosial|donasi|amal|zakat/i, '🤝'], [/gaji/i, '💼'],
@@ -1095,7 +1096,7 @@ function openTxForm(tx, prefill) {
   const edit = !!tx;
   F = edit ? Object.assign({}, tx, { mode: 'edit', jenisTouched: true })
     : Object.assign({ mode: 'add', id: uuid(), jenis: 'pengeluaran', nominal: 0, kategori: null, tanggal: ymd(today()), keterangan: '', jenisTouched: false }, prefill || {});
-  if (edit) { const l = S.mutasi.find(m => m.ref === tx.id); F.aset = l ? { asetId: l.asetId, gram: Math.abs(l.gram || 0) } : null; }
+  if (edit) { const l = S.mutasi.find(m => m.ref === tx.id); F.aset = l ? { asetId: l.asetId, gram: Math.abs(l.gram || 0), arah: ARAH_OF[l.jenis] || defaultArah(tx.jenis, tx.kategori) } : null; }
   openSheet(`
     <div class="sheet-head"><h3>${edit ? 'Ubah transaksi' : 'Tambah transaksi'}</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
     <form class="sheet-body" id="tx-form" novalidate autocomplete="off">
@@ -1110,6 +1111,7 @@ function openTxForm(tx, prefill) {
         <div class="quick">${[10000, 20000, 25000, 50000, 100000, 500000].map(v => `<button type="button" data-q="${v}">${rpShort(v)}</button>`).join('')}</div></div>
       <div class="field"><span class="lbl">Kategori</span><div class="cat-grid" id="f-cats"></div><div class="err-msg" id="f-cat-err" hidden></div></div>
       <div class="field" id="f-aset-field" hidden><label for="f-aset" id="f-aset-lbl">Aset terkait</label>
+        <div class="seg seg-sm" id="f-arah" style="margin-bottom:8px"><button type="button" data-a="1"></button><button type="button" data-a="2"></button></div>
         <select class="input" id="f-aset"></select>
         <div class="date-row" id="f-gram-wrap" style="margin-top:8px" hidden><input class="input" id="f-gram" inputmode="decimal" placeholder="Jumlah gram, mis. 2,5"><span class="muted" style="align-self:center;font-weight:600">gram</span></div>
         <div class="hint" id="f-aset-hint"></div></div>
@@ -1150,7 +1152,11 @@ function openTxForm(tx, prefill) {
     $$('.quick button', sh).forEach(b => b.addEventListener('click', () => { F.nominal = Number(b.dataset.q); nom.value = nf.format(F.nominal); clearErr('nominal'); }));
     $$('[data-d]', sh).forEach(b => b.addEventListener('click', () => { F.tanggal = ymd(addDays(today(), Number(b.dataset.d))); tgl.value = F.tanggal; }));
     $('#tx-form', sh).addEventListener('submit', e => { e.preventDefault(); submitTx(); });
-    $('#f-aset', sh).addEventListener('change', e => { F.aset = e.target.value ? { asetId: e.target.value, gram: (F.aset && F.aset.gram) || 0 } : null; updateAsetField(); });
+    $('#f-aset', sh).addEventListener('change', e => { F.aset = e.target.value ? { asetId: e.target.value, gram: (F.aset && F.aset.gram) || 0, arah: F.aset && F.aset.arah } : null; updateAsetField(); });
+    $('#f-arah', sh).addEventListener('click', e => {
+      const b = e.target.closest('[data-v]'); if (!b) return;
+      F.aset = Object.assign({ asetId: '', gram: 0 }, F.aset || {}, { arah: b.dataset.v }); F.asetForce = true; updateAsetField();
+    });
     $('#f-gram', sh).addEventListener('input', e => { if (F.aset) F.aset.gram = Number(String(e.target.value).replace(',', '.')) || 0; updateAsetField(); });
     $('#f-aset-link', sh).addEventListener('click', () => { F.asetForce = true; updateAsetField(); });
     updateAsetField();
@@ -1163,22 +1169,34 @@ function updateAsetField() {
   if (!field || !F) return;
   const simpanan = S.assets.filter(a => a.aktif && a.jenis !== KAS);
   const auto = (F.jenis === 'pengeluaran' && SAVING_RE.test(F.kategori || '')) || (F.jenis === 'pemasukan' && WITHDRAW_RE.test(F.kategori || ''));
-  const show = simpanan.length > 0 && (auto || F.asetForce || (F.aset && F.aset.asetId));
+  // Kategori bernama sama dengan dana khusus (mis. "Traveling") → otomatis dibayar dari dana itu.
+  const namesake = simpanan.find(a => a.nama.toLowerCase() === String(F.kategori || '').toLowerCase());
+  if (namesake && !F.aset && F.mode === 'add') F.aset = { asetId: namesake.id, gram: 0, arah: F.jenis === 'pengeluaran' ? 'bayar' : 'terima' };
+  const show = simpanan.length > 0 && (auto || F.asetForce || !!namesake || (F.aset && F.aset.asetId));
   field.hidden = !show;
   $('#f-aset-link').hidden = show || !simpanan.length;
   if (!show) return;
   if (auto && !F.aset && simpanan.length === 1) F.aset = { asetId: simpanan[0].id, gram: 0 };
+  if (F.aset && !arahValid(F.jenis, F.aset.arah)) F.aset.arah = defaultArah(F.jenis, F.kategori);
+  const arah = F.aset ? F.aset.arah : defaultArah(F.jenis, F.kategori);
+  const opts = F.jenis === 'pengeluaran' ? [['setor', 'Menabung ke aset'], ['bayar', 'Dibayar dari aset']] : [['tarik', 'Ambil ke uang harian'], ['terima', 'Masuk langsung ke aset']];
+  $$('#f-arah [data-a]').forEach((b, i) => { b.dataset.v = opts[i][0]; b.textContent = opts[i][1]; b.classList.toggle('on', opts[i][0] === arah); b.classList.toggle('inc-on', opts[i][0] === arah); });
   const sel = $('#f-aset');
   const cur = F.aset ? F.aset.asetId : '';
-  sel.innerHTML = `<option value="">— Tidak dihubungkan —</option>` + simpanan.map(a => `<option value="${esc(a.id)}" ${a.id === cur ? 'selected' : ''}>${assetEmoji(a)} ${esc(a.nama)}</option>`).join('');
-  $('#f-aset-lbl').textContent = F.jenis === 'pengeluaran' ? 'Masuk ke aset (menabung)' : 'Diambil dari aset';
+  sel.innerHTML = `<option value="">— Tidak dihubungkan —</option>` + simpanan.map(a => `<option value="${esc(a.id)}" ${a.id === cur ? 'selected' : ''}>${assetEmoji(a)} ${esc(a.nama)} · ${rp(assetValue(a))}</option>`).join('');
+  $('#f-aset-lbl').textContent = 'Hubungkan ke aset';
   const a = S.assets.find(x => x.id === cur);
   const gw = $('#f-gram-wrap');
   gw.hidden = !(a && a.jenis === 'Emas');
   if (!gw.hidden && document.activeElement !== $('#f-gram')) $('#f-gram').value = F.aset && F.aset.gram ? String(F.aset.gram).replace('.', ',') : '';
-  $('#f-aset-hint').textContent = a
-    ? `${a.nama} ${F.jenis === 'pengeluaran' ? 'bertambah' : 'berkurang'} ${F.nominal ? rp(F.nominal) : ''}${a.jenis === 'Emas' && F.aset && F.aset.gram ? ` (${String(F.aset.gram).replace('.', ',')} gram)` : ''}.`
-    : 'Pilih aset supaya saldo tabungan ikut tercatat.';
+  const n = F.nominal ? rp(F.nominal) : '';
+  const g = a && a.jenis === 'Emas' && F.aset && F.aset.gram ? ` (${String(F.aset.gram).replace('.', ',')} gram)` : '';
+  const sisa = a ? assetValue(a) : 0;
+  $('#f-aset-hint').innerHTML = !a ? 'Pilih asetnya.'
+    : arah === 'setor' ? `${esc(a.nama)} bertambah ${n}${g}; uang harian berkurang.`
+    : arah === 'bayar' ? `Dibayar dari ${esc(a.nama)} (saldo ${rp(sisa)}); uang harian tidak berkurang.${F.nominal > sisa && a.jenis !== 'Emas' ? ' <b class="exp">Saldo tidak cukup.</b>' : ''}`
+    : arah === 'tarik' ? `${esc(a.nama)} berkurang ${n}${g}; uang harian bertambah.`
+    : `Langsung masuk ke ${esc(a.nama)}; uang harian tidak bertambah.`;
 }
 
 function setJenis(j, resetCat) {
@@ -1213,6 +1231,9 @@ function applySmart(text) {
     const emas = S.assets.find(a => a.aktif && a.jenis === 'Emas');
     if (emas) F.aset = { asetId: emas.id, gram: p.gram };
   }
+  const low = ' ' + text.toLowerCase() + ' ';
+  const src = S.assets.find(a => a.aktif && a.jenis !== KAS && low.includes(' dari ' + a.nama.toLowerCase()));
+  if (src) F.aset = { asetId: src.id, gram: F.aset && F.aset.gram || 0, arah: F.jenis === 'pengeluaran' ? 'bayar' : 'tarik' };
   updateAsetField();
   F.keterangan = p.keterangan; $('#f-ket').value = p.keterangan;
   prev.innerHTML = [
@@ -1238,7 +1259,7 @@ function submitTx() {
   }
   const asetOn = !$('#f-aset-field').hidden && F.aset && F.aset.asetId;
   const tx = { id: F.id, jenis: F.jenis, tanggal: F.tanggal, kategori: F.kategori, keterangan: (F.keterangan || '').trim(), nominal: F.nominal,
-    aset: asetOn ? { asetId: F.aset.asetId, gram: F.aset.gram || 0 } : null };
+    aset: asetOn ? { asetId: F.aset.asetId, gram: F.aset.gram || 0, arah: arahValid(F.jenis, F.aset.arah) ? F.aset.arah : defaultArah(F.jenis, F.kategori) } : null };
   const isEdit = F.mode === 'edit';
   F = null;
   closeSheet();
@@ -1657,13 +1678,18 @@ function afterOnboarding() {
    Emas       : (gram awal + gram mutasi) × harga per gram terakhir.
    Menabung dicatat sebagai pengeluaran (keluar dari kas) dan sekaligus menambah aset tujuan. */
 const KAS = 'Kas utama';
-const ASET_JENIS = ['Bank', 'E-wallet', 'Tunai', 'Emas', 'Deposito', 'Lainnya'];
-const ASET_EMOJI = { 'Kas utama': '👛', Bank: '🏦', 'E-wallet': '📱', Tunai: '💵', Emas: '🪙', Deposito: '📜', Lainnya: '📦' };
+const ASET_JENIS = ['Bank', 'E-wallet', 'Tunai', 'Emas', 'Deposito', 'Dana khusus', 'Lainnya'];
+// Arah transaksi tertaut aset. pengeluaran: setor (kas→aset) | bayar (langsung dari aset). pemasukan: tarik (aset→kas) | terima (langsung ke aset).
+const ARAH = { setor: ['Setor', 1], bayar: ['Bayar', -1], tarik: ['Tarik', -1], terima: ['Terima', 1] };
+const ARAH_OF = { Setor: 'setor', Bayar: 'bayar', Tarik: 'tarik', Terima: 'terima' };
+const arahValid = (jenis, arah) => (jenis === 'pengeluaran' ? ['setor', 'bayar'] : ['tarik', 'terima']).includes(arah);
+const defaultArah = (jenis, kategori) => (jenis === 'pengeluaran' ? (SAVING_RE.test(kategori || '') ? 'setor' : 'bayar') : (WITHDRAW_RE.test(kategori || '') ? 'tarik' : 'terima'));
+const ASET_EMOJI = { 'Kas utama': '👛', Bank: '🏦', 'E-wallet': '📱', Tunai: '💵', Emas: '🪙', Deposito: '📜', 'Dana khusus': '🎯', Lainnya: '📦' };
 const assetEmoji = a => ASET_EMOJI[a.jenis] || '📦';
 const activeAssets = () => S.assets.filter(a => a.aktif);
 const normAsset = p => ({ id: String(p.id), nama: String(p.nama || '').trim(), jenis: p.jenis === KAS || ASET_JENIS.includes(p.jenis) ? p.jenis : 'Lainnya',
   saldoAwal: Math.round(Number(p.saldoAwal) || 0), gramAwal: Math.max(0, Number(p.gramAwal) || 0), mulai: String(p.mulai || ymd(today())),
-  harga: Math.max(0, Math.round(Number(p.harga) || 0)), aktif: p.aktif !== false });
+  harga: Math.max(0, Math.round(Number(p.harga) || 0)), aktif: p.aktif !== false, target: Math.max(0, Math.round(Number(p.target) || 0)) });
 const normMutasi = p => ({ id: String(p.id), tanggal: String(p.tanggal), asetId: String(p.asetId), jenis: String(p.jenis || 'Penyesuaian'),
   nominal: Math.round(Number(p.nominal) || 0), gram: Number(p.gram) || 0, catatan: String(p.catatan || ''), ref: String(p.ref || '') });
 
@@ -1674,7 +1700,9 @@ function assetValue(a, upTo = ymd(today())) {
   if (upTo < a.mulai) return 0;
   const sumN = S.mutasi.reduce((s, m) => s + (m.asetId === a.id && m.tanggal >= a.mulai && m.tanggal <= upTo ? (m.nominal || 0) : 0), 0);
   if (a.jenis === KAS) {
-    const flow = S.tx.reduce((s, t) => s + (t.tanggal >= a.mulai && t.tanggal <= upTo ? (t.jenis === 'pemasukan' ? t.nominal : -t.nominal) : 0), 0);
+    // Transaksi yang dibayar langsung dari aset lain / masuk langsung ke aset lain tidak mengubah kas utama.
+    const off = new Set(S.mutasi.filter(m => m.ref && (m.jenis === 'Bayar' || m.jenis === 'Terima')).map(m => m.ref));
+    const flow = S.tx.reduce((s, t) => s + (t.tanggal >= a.mulai && t.tanggal <= upTo && !off.has(t.id) ? (t.jenis === 'pemasukan' ? t.nominal : -t.nominal) : 0), 0);
     return a.saldoAwal + flow + sumN;
   }
   if (a.jenis === 'Emas' && a.harga > 0) return Math.round(assetGram(a, upTo) * a.harga);
@@ -1686,8 +1714,9 @@ const totalAssets = (upTo = ymd(today())) => activeAssets().reduce((s, a) => s +
 function linkTxMutasi(tx) {
   S.mutasi = S.mutasi.filter(m => m.ref !== tx.id);
   if (!tx.aset || !tx.aset.asetId) return;
-  const sign = tx.jenis === 'pengeluaran' ? 1 : -1;
-  S.mutasi.push(normMutasi({ id: 'tx-' + tx.id, tanggal: tx.tanggal, asetId: tx.aset.asetId, jenis: sign > 0 ? 'Setor' : 'Tarik',
+  const arah = arahValid(tx.jenis, tx.aset.arah) ? tx.aset.arah : (tx.jenis === 'pengeluaran' ? 'setor' : 'tarik');
+  const [label, sign] = ARAH[arah];
+  S.mutasi.push(normMutasi({ id: 'tx-' + tx.id, tanggal: tx.tanggal, asetId: tx.aset.asetId, jenis: label,
     nominal: sign * tx.nominal, gram: sign * (Number(tx.aset.gram) || 0), catatan: tx.keterangan || tx.kategori, ref: tx.id }));
 }
 function applyAssetOpLocal(op) {
@@ -1720,18 +1749,18 @@ async function ensureCategory(jenis, re, name) {
 
 function cycleStats(r) {
   const list = S.tx.filter(t => inRange(t, r));
-  const linked = new Set(S.mutasi.filter(m => m.ref).map(m => m.ref));
+  const linkJ = new Map(S.mutasi.filter(m => m.ref).map(m => [m.ref, m.jenis]));
   let masuk = 0, keluar = 0, ditabung = 0, diambil = 0, tabungLink = 0, ambilLink = 0;
   list.forEach(t => {
-    const isLink = linked.has(t.id);
+    const lj = linkJ.get(t.id);
     if (t.jenis === 'pemasukan') {
       masuk += t.nominal;
-      if (isLink || WITHDRAW_RE.test(t.kategori)) diambil += t.nominal;
-      if (isLink) ambilLink += t.nominal;
+      if (lj === 'Tarik' || (!lj && WITHDRAW_RE.test(t.kategori))) diambil += t.nominal;
+      if (lj === 'Tarik') ambilLink += t.nominal;
     } else {
       keluar += t.nominal;
-      if (isLink || SAVING_RE.test(t.kategori)) ditabung += t.nominal;
-      if (isLink) tabungLink += t.nominal;
+      if (lj === 'Setor' || (!lj && SAVING_RE.test(t.kategori))) ditabung += t.nominal;
+      if (lj === 'Setor') tabungLink += t.nominal;
     }
   });
   return { masuk, keluar, ditabung, diambil, konsumsi: keluar - ditabung, net: masuk - keluar + tabungLink - ambilLink, n: list.length };
@@ -1755,6 +1784,7 @@ function evalFinance() {
   let avgKons = kons.length ? kons.reduce((a, b) => a + b, 0) / kons.length : 0;
   let basis = `rata-rata pengeluaran ${kons.length} bulan terakhir, di luar tabungan`;
   let basisBudget = false;
+  if (S.settings.danaDarurat > 0) { avgKons = S.settings.danaDarurat; basis = 'pengeluaran wajib yang Anda tetapkan'; }
   if (!avgKons) {
     // Rencana bulan ini; kalau belum ada, rencana terdekat (mis. Desember yang sudah disiapkan).
     const keys = Object.keys(S.plans || {}).filter(k => Object.keys(S.plans[k] || {}).length).sort();
@@ -1793,7 +1823,7 @@ function renderAssets() {
   const byJenis = {};
   act.forEach(a => { byJenis[a.jenis] = (byJenis[a.jenis] || 0) + Math.max(0, assetValue(a, now)); });
   const posTotal = Object.values(byJenis).reduce((a, b) => a + b, 0) || 1;
-  const JCOL = { 'Kas utama': '#6A5CFF', Bank: '#3E7BFA', 'E-wallet': '#14C8B8', Tunai: '#10B981', Emas: '#F59E0B', Deposito: '#EC4899', Lainnya: '#94A3B8' };
+  const JCOL = { 'Kas utama': '#6A5CFF', Bank: '#3E7BFA', 'E-wallet': '#14C8B8', Tunai: '#10B981', Emas: '#F59E0B', Deposito: '#EC4899', 'Dana khusus': '#A855F7', Lainnya: '#94A3B8' };
   const comp = Object.keys(byJenis).filter(k => byJenis[k] > 0).sort((a, b) => byJenis[b] - byJenis[a]);
   const future = act.some(a => a.mulai > now);
   const cards = act.slice().sort((a, b) => (a.jenis === KAS ? -1 : b.jenis === KAS ? 1 : assetValue(b, now) - assetValue(a, now))).map(a => {
@@ -1801,13 +1831,15 @@ function renderAssets() {
     const sub = a.mulai > now ? `Mulai dicatat ${fmtDate(a.mulai)} · saldo awal ${a.jenis === 'Emas' && a.harga ? `${fmtGram(a.gramAwal)} gram` : rp(a.saldoAwal)}`
       : a.jenis === KAS ? `Otomatis dari transaksi sejak ${fmtDate(a.mulai)}`
       : a.jenis === 'Emas' ? `${fmtGram(assetGram(a, now))} gram × ${a.harga ? rp(a.harga) : 'harga belum diisi'}`
+      : a.target ? `Dana khusus · target ${rp(a.target)}`
       : a.jenis;
     return `<div class="asset-card">
       <div class="ac-top"><span class="cat-ava" style="background:${JCOL[a.jenis] || '#94A3B8'}1F">${assetEmoji(a)}</span>
         <div class="ac-name"><b>${esc(a.nama)}</b><span>${esc(sub)}</span></div>
         <b class="num ac-val">${a.mulai > now ? rp(a.jenis === 'Emas' && a.harga ? Math.round(a.gramAwal * a.harga) : a.saldoAwal) : rp(v)}</b></div>
+      ${a.target ? `<div class="ac-target"><div class="bar thin"><div class="fill ${v >= a.target ? 'done' : ''}" style="width:${Math.min(100, Math.max(0, v) / a.target * 100)}%"></div></div><span class="num">${Math.round(Math.max(0, v) / a.target * 100)}% · ${v >= a.target ? 'target tercapai' : 'kurang ' + rp(a.target - v)}</span></div>` : ''}
       <div class="ac-acts">
-        ${a.jenis === KAS ? '' : `<button class="chip" data-action="asset-setor" data-id="${esc(a.id)}">${ico('down', 'xs')} Setor</button><button class="chip" data-action="asset-tarik" data-id="${esc(a.id)}">${ico('up', 'xs')} Pakai</button>`}
+        ${a.jenis === KAS ? '' : `<button class="chip" data-action="asset-setor" data-id="${esc(a.id)}">${ico('down', 'xs')} Setor</button><button class="chip" data-action="asset-tarik" data-id="${esc(a.id)}">${ico('up', 'xs')} Bayar dari sini</button>`}
         <button class="chip" data-action="asset-update" data-id="${esc(a.id)}">${ico('refresh', 'xs')} ${a.jenis === 'Emas' ? 'Harga' : 'Sesuaikan'}</button>
         <button class="chip" data-action="asset-edit" data-id="${esc(a.id)}" aria-label="Ubah ${esc(a.nama)}">${ico('settings', 'xs')}</button>
       </div></div>`;
@@ -1854,7 +1886,8 @@ function evalCard(e) {
       <div class="budget-msg">${m >= 6 ? 'Aman: simpanan likuid sudah menutup lebih dari 6 bulan pengeluaran. Kelebihannya bisa diarahkan ke tujuan jangka panjang.'
         : m >= 3 ? `Cukup (3–6 bulan). Tambah ${rp(e.avgKons * 6 - e.liquid)} untuk mencapai 6 bulan.`
         : `Belum aman. Kurang ${rp(need3)} untuk minimal 3 bulan pengeluaran.`}${e.emasVal && m >= 3 && e.liquidCash / e.avgKons < 3 ? ` Sebagian besar dalam bentuk emas; sisakan minimal 3 bulan (${rp(e.avgKons * 3)}) di tabungan karena harga emas bisa sedang turun saat perlu dijual.` : ''}</div>
-      <div class="hint">Dihitung dari tabungan/e-wallet/tunai ${rp(e.liquidCash)}${e.emasVal ? ` + emas ${rp(e.emasVal)} × 90% = ${rp(e.emasCair)}` : ''}, dibagi ${rp(e.avgKons)}/bulan (${esc(e.basis)}). Kas utama tidak dihitung karena dipakai untuk belanja bulan berjalan.${e.basisBudget ? ' Budget bulanan biasanya termasuk tabungan, jadi angka ini terlalu tinggi; isi Rencana (tanpa pos Menabung) supaya hitungannya pas.' : ''}</div></div>`);
+      <div class="hint">Dihitung dari tabungan/e-wallet/tunai ${rp(e.liquidCash)}${e.emasVal ? ` + emas ${rp(e.emasVal)} × 90% = ${rp(e.emasCair)}` : ''}, dibagi ${rp(e.avgKons)}/bulan (${esc(e.basis)}). Kas utama (uang belanja bulan berjalan) dan dana khusus (sudah ada peruntukannya, mis. traveling) tidak dihitung.${e.basisBudget ? ' Budget bulanan biasanya termasuk tabungan, jadi angka ini terlalu tinggi.' : ''}</div>
+      <button class="link-btn" data-action="open-dd-basis" style="padding-left:0">Ubah dasar hitungan (pengeluaran wajib/bulan)</button></div>`);
   }
   if (e.cs.masuk || e.target) {
     const pct = e.target ? e.cs.ditabung / e.target : 0;
@@ -1871,7 +1904,8 @@ function evalCard(e) {
 
 function yearView() {
   const act = activeAssets();
-  const startYmd = act.map(a => a.mulai).sort()[0];
+  const kasA = act.find(a => a.jenis === KAS);
+  const startYmd = kasA ? kasA.mulai : act.map(a => a.mulai).sort()[0]; // 12 bulan dihitung sejak mulai mencatat transaksi
   let r = cycleRange(parseYmd(startYmd));
   const nowS = ymd(today());
   const months = [];
@@ -1988,7 +2022,7 @@ function openAssetEdit(a) {
   const edit = !!a;
   const hasKas = S.assets.some(x => x.aktif && x.jenis === KAS && (!a || x.id !== a.id));
   const jenisList = (hasKas ? [] : [KAS]).concat(ASET_JENIS);
-  const v = a || { nama: '', jenis: 'Bank', saldoAwal: 0, gramAwal: 0, harga: 0, mulai: ymd(today()) < '2026-12-01' ? '2026-12-01' : ymd(today()) };
+  const v = a || { nama: '', jenis: 'Bank', saldoAwal: 0, gramAwal: 0, harga: 0, target: 0, mulai: ymd(today()) < '2026-12-01' ? '2026-12-01' : ymd(today()) };
   openSheet(`
     <div class="sheet-head"><h3>${edit ? 'Ubah aset' : 'Tambah aset'}</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
     <div class="sheet-body">
@@ -1996,25 +2030,28 @@ function openAssetEdit(a) {
       <div class="field"><label for="ae-jenis">Jenis</label><select class="input" id="ae-jenis">${jenisList.map(j => `<option ${j === v.jenis ? 'selected' : ''}>${j}</option>`).join('')}</select></div>
       <div class="field"><label for="ae-mulai">Mulai dicatat per</label><input class="input" type="date" id="ae-mulai" value="${v.mulai}"></div>
       <div class="field" id="ae-saldo-f"><label for="ae-saldo">Saldo awal (per tanggal mulai)</label>${moneyInput('ae-saldo', v.saldoAwal)}</div>
+      <div class="field" id="ae-target-f"><label for="ae-target">Target dana (opsional)</label>${moneyInput('ae-target', v.target)}<div class="hint">Mis. target traveling Rp 10.000.000. Kategori pengeluaran dengan nama yang sama otomatis dibuat, dan pengeluaran di kategori itu langsung dibayar dari dana ini.</div></div>
       <div class="field" id="ae-emas-f"><label>Emas awal</label><div class="date-row as-lbls"><span>Jumlah gram</span><span>Harga per gram (Rp)</span></div><div class="date-row"><input class="input" id="ae-gram" inputmode="decimal" value="${v.gramAwal ? fmtGram(v.gramAwal) : ''}" placeholder="Gram"><input class="input" id="ae-harga" inputmode="numeric" value="${v.harga ? nf.format(v.harga) : ''}" placeholder="Harga per gram"></div></div>
       <div class="err-msg" id="ae-err" hidden></div>
     </div>
     <div class="sheet-foot">${edit ? `<button class="btn danger" style="width:auto;flex-shrink:0" id="ae-arsip">Arsipkan</button>` : ''}<button class="btn primary" id="ae-save">${ico('check')} Simpan</button></div>`, sh => {
     const jenis = $('#ae-jenis', sh);
-    const paint = () => { $('#ae-emas-f').hidden = jenis.value !== 'Emas'; $('#ae-saldo-f').hidden = jenis.value === 'Emas'; };
+    const paint = () => { $('#ae-emas-f').hidden = jenis.value !== 'Emas'; $('#ae-saldo-f').hidden = jenis.value === 'Emas'; $('#ae-target-f').hidden = jenis.value !== 'Dana khusus'; };
     jenis.addEventListener('change', paint); paint();
-    bindMoney($('#ae-saldo')); bindMoney($('#ae-harga'));
+    bindMoney($('#ae-saldo')); bindMoney($('#ae-harga')); bindMoney($('#ae-target'));
     $('#ae-save', sh).onclick = async () => {
       const nama = $('#ae-nama').value.trim(), err = $('#ae-err');
       if (!nama) { err.textContent = 'Nama aset wajib diisi.'; err.hidden = false; return; }
       const p = { id: edit ? a.id : uuid(), nama, jenis: jenis.value, mulai: $('#ae-mulai').value || ymd(today()), aktif: true,
         saldoAwal: jenis.value === 'Emas' ? 0 : moneyVal($('#ae-saldo')),
         gramAwal: jenis.value === 'Emas' ? Number(String($('#ae-gram').value).replace(',', '.')) || 0 : 0,
-        harga: jenis.value === 'Emas' ? moneyVal($('#ae-harga')) : 0 };
+        harga: jenis.value === 'Emas' ? moneyVal($('#ae-harga')) : 0,
+        target: jenis.value === 'Dana khusus' ? moneyVal($('#ae-target')) : 0 };
       closeSheet();
       const r = await assetOp('saveAsset', p);
       toast(r.ok ? `${nama} disimpan` : r.offline ? 'Tersimpan di HP · dikirim saat online' : 'Gagal: ' + r.msg, r.ok ? 'ok' : r.offline ? 'warn' : 'err');
-      ensureCategory('pengeluaran', SAVING_RE, 'Menabung');
+      await ensureCategory('pengeluaran', SAVING_RE, 'Menabung');
+      if (p.jenis === 'Dana khusus') await ensureCategory('pengeluaran', new RegExp('^' + nama.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i'), nama);
     };
     const ar = $('#ae-arsip', sh);
     if (ar) ar.onclick = async () => {
@@ -2073,9 +2110,40 @@ function openAssetUpdate(a) {
 async function assetQuickTx(id, jenis) {
   const a = S.assets.find(x => x.id === id);
   if (!a) return;
-  const kategori = jenis === 'pengeluaran' ? await ensureCategory('pengeluaran', SAVING_RE, 'Menabung') : await ensureCategory('pemasukan', WITHDRAW_RE, 'Ambil dari Tabungan');
-  openTxForm(null, { jenis, kategori, jenisTouched: true, asetForce: true, aset: { asetId: id, gram: 0 },
-    keterangan: jenis === 'pengeluaran' ? `Setor ke ${a.nama}` : `Pakai dari ${a.nama}` });
+  if (jenis === 'pengeluaran') {
+    const kategori = await ensureCategory('pengeluaran', SAVING_RE, 'Menabung');
+    return openTxForm(null, { jenis, kategori, jenisTouched: true, asetForce: true, aset: { asetId: id, gram: 0, arah: 'setor' }, keterangan: `Setor ke ${a.nama}` });
+  }
+  // "Bayar dari sini": pengeluaran yang dibayar langsung dari aset ini, bukan dari uang harian.
+  const sameCat = categoriesFor('pengeluaran').find(c => c.toLowerCase() === a.nama.toLowerCase()) || null;
+  openTxForm(null, { jenis: 'pengeluaran', kategori: sameCat, jenisTouched: true, asetForce: true, aset: { asetId: id, gram: 0, arah: 'bayar' }, keterangan: '' });
+}
+
+/** Dasar hitungan dana darurat: pengeluaran wajib per bulan (bisa dipilih dari pos rencana). */
+function openDDBasis() {
+  const NONESS = /zakat|sosial|donasi|hiburan|rekreasi|langganan|claude|netflix|spotify|lainnya|traveling|liburan|tak terduga/i;
+  const keys = Object.keys(S.plans || {}).filter(k => Object.keys(S.plans[k] || {}).length).sort();
+  const pk = keys.includes(planKey()) ? planKey() : (keys.filter(k => k > planKey())[0] || keys[keys.length - 1]);
+  const items = pk ? planAll(pk).filter(c => !SAVING_RE.test(c.kat)) : [];
+  openSheet(`
+    <div class="sheet-head"><h3>Dasar hitungan dana darurat</h3><button class="icon-btn" data-action="close-sheet" aria-label="Tutup">${ico('x')}</button></div>
+    <div class="sheet-body">
+      <p class="hint" style="margin-top:0">Dana darurat dihitung dari <b>pengeluaran wajib</b>: yang tetap harus dibayar kalau pemasukan berhenti (makan, transport, tagihan, asuransi, orang tua). Tabungan, zakat profesi, hiburan, dan pengeluaran yang bisa ditunda tidak perlu dimasukkan.</p>
+      ${items.length ? `<div class="field"><span class="lbl">Pilih dari rencana ${esc(cycleRange(parseYmd(pk)).label)}</span>
+        <div id="dd-items">${items.map(c => `<label class="dd-item"><input type="checkbox" data-v="${c.jatah}" ${NONESS.test(c.kat) ? '' : 'checked'}> <span>${catEmoji(c.kat)} ${esc(c.kat)}</span><b class="num">${rp(c.jatah)}</b></label>`).join('')}</div></div>` : ''}
+      <div class="field"><label for="dd-val">Pengeluaran wajib per bulan</label>${moneyInput('dd-val', S.settings.danaDarurat)}<div class="hint" id="dd-hint"></div></div>
+    </div>
+    <div class="sheet-foot"><button class="btn ghost" style="width:auto" id="dd-auto">Otomatis</button><button class="btn primary" id="dd-save">${ico('check')} Simpan</button></div>`, sh => {
+    const inp = $('#dd-val', sh); bindMoney(inp);
+    const sumItems = () => $$('#dd-items input', sh).reduce((s, x) => s + (x.checked ? Number(x.dataset.v) : 0), 0);
+    const sync = () => { if (items.length) { const v = sumItems(); inp.value = v ? nf.format(v) : ''; } hint(); };
+    const hint = () => { const v = moneyVal(inp), e = evalFinance(); $('#dd-hint').textContent = v ? `Dengan angka ini dana darurat Anda ≈ ${(Math.round(e.liquid / v * 10) / 10).toString().replace('.', ',')} bulan.` : ''; };
+    $$('#dd-items input', sh).forEach(x => x.addEventListener('change', sync));
+    inp.addEventListener('input', hint);
+    if (!S.settings.danaDarurat && items.length) sync(); else hint();
+    $('#dd-save', sh).onclick = async () => { const v = moneyVal(inp); closeSheet(); await updateSettings({ danaDarurat: v }); toast(v ? `Pengeluaran wajib ${rp(v)}/bulan disimpan` : 'Kembali ke perhitungan otomatis', 'ok'); };
+    $('#dd-auto', sh).onclick = async () => { closeSheet(); await updateSettings({ danaDarurat: 0 }); toast('Kembali ke perhitungan otomatis', 'ok'); };
+  });
 }
 
 async function openMutasi(id) {
@@ -2125,6 +2193,7 @@ const ACTIONS = {
   'asset-setor': el => assetQuickTx(el.dataset.id, 'pengeluaran'),
   'asset-tarik': el => assetQuickTx(el.dataset.id, 'pemasukan'),
   'mutasi-open': el => openMutasi(el.dataset.id),
+  'open-dd-basis': () => openDDBasis(),
   'plan-toggle': el => togglePlanLunas(el.dataset.cat),
   'open-cats': () => openCats('pengeluaran'),
   'open-conn': () => openConn(),
